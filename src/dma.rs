@@ -369,6 +369,9 @@ pub enum DmaError {
     DestBusError,
     /// Transfer was cancelled.
     Cancelled,
+    /// A bounded wait (`wait_timeout`) passed its cycle limit before the
+    /// transfer completed or a channel reported an error.
+    Timeout,
 }
 
 // ----- DMA Channel -----
@@ -909,6 +912,48 @@ impl<'a, const CH: u8> DmaTransfer<'a, CH> {
             }
         }
     }
+
+    /// Block until the transfer completes, errors, or `max_cycles` DWT
+    /// cycles pass.
+    ///
+    /// The checks run in the same order as [`wait()`](DmaTransfer::wait)
+    /// (error, then complete), then the timeout check. On completion or
+    /// error, the result is the same as `wait()`. On a timeout, returns
+    /// `Err(DmaError::Timeout)`; the Drop impl then disables the channel
+    /// request and clears its DONE and error flags.
+    ///
+    /// The elapsed time comes from `DWT::cycle_count()` with
+    /// `wrapping_sub`, so one counter wrap during the wait is safe.
+    /// The caller must have the DWT cycle counter running
+    /// (`DCB::enable_trace()` and `DWT::enable_cycle_counter()`); this
+    /// function does not enable it. If the counter is stopped, the wait
+    /// never times out.
+    pub fn wait_timeout(self, max_cycles: u32) -> Result<&'a mut DmaChannel<CH>, DmaError> {
+        let start = cortex_m::peripheral::DWT::cycle_count();
+        loop {
+            if self.channel.has_error() {
+                let err = self.channel.error_status().unwrap_or(DmaError::Cancelled);
+                self.channel.clear_error();
+                self.channel.clear_done();
+                self.channel.disable_request();
+                core::mem::forget(self);
+                return Err(err);
+            }
+            if self.channel.is_complete() {
+                self.channel.clear_done();
+                self.channel.disable_request();
+                // SAFETY: as in `wait()`: the raw pointer keeps the 'a
+                // lifetime of self.channel, and forget() stops the Drop impl.
+                let ch_ptr = self.channel as *const DmaChannel<CH> as *mut DmaChannel<CH>;
+                core::mem::forget(self);
+                return Ok(unsafe { &mut *ch_ptr });
+            }
+            if cortex_m::peripheral::DWT::cycle_count().wrapping_sub(start) >= max_cycles {
+                // Dropping self aborts the transfer.
+                return Err(DmaError::Timeout);
+            }
+        }
+    }
 }
 
 impl<'a, const CH: u8> Drop for DmaTransfer<'a, CH> {
@@ -952,6 +997,44 @@ impl<const TX_CH: u8, const RX_CH: u8> DmaReadTransfer<'_, TX_CH, RX_CH> {
             }
             if self.rx_channel.is_complete() {
                 return Ok(());
+            }
+        }
+    }
+
+    /// Block until the read completes, a channel errors, or `max_cycles` DWT
+    /// cycles pass.
+    ///
+    /// The checks run in the same order as
+    /// [`wait()`](DmaReadTransfer::wait) (RX error, TX error, RX complete),
+    /// then the timeout check. On a timeout, returns
+    /// `Err(DmaError::Timeout)`; the Drop impl then disables both channel
+    /// requests and clears their DONE and error flags.
+    ///
+    /// The elapsed time comes from `DWT::cycle_count()` with
+    /// `wrapping_sub`, so one counter wrap during the wait is safe.
+    /// The caller must have the DWT cycle counter running
+    /// (`DCB::enable_trace()` and `DWT::enable_cycle_counter()`); this
+    /// function does not enable it. If the counter is stopped, the wait
+    /// never times out.
+    ///
+    /// This function does not touch the SPI peripheral. After any result,
+    /// and most of all after a timeout (the FIFOs can hold stale words),
+    /// call `Spi::disable_dma_requests()` and `Spi::flush_fifos()`, as
+    /// after `wait()`.
+    pub fn wait_timeout(self, max_cycles: u32) -> Result<(), DmaError> {
+        let start = cortex_m::peripheral::DWT::cycle_count();
+        loop {
+            if self.rx_channel.has_error() {
+                return Err(self.rx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.tx_channel.has_error() {
+                return Err(self.tx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.rx_channel.is_complete() {
+                return Ok(());
+            }
+            if cortex_m::peripheral::DWT::cycle_count().wrapping_sub(start) >= max_cycles {
+                return Err(DmaError::Timeout);
             }
         }
     }

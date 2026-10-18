@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `DmaReadTransfer::wait_timeout(max_cycles)` and
+  `DmaTransfer::wait_timeout(max_cycles)`: the same checks as `wait()`,
+  then a limit in DWT cycles. On the limit they return
+  `Err(DmaError::Timeout)` and the Drop impl stops the channels. `wait()`
+  loops with no limit, so an RX channel that misses one byte never returns.
+  The caller must have the DWT cycle counter running. Added for the FLXS1
+  flash reads.
+- `DmaError::Timeout`. `DmaError` is not `#[non_exhaustive]`, so an
+  exhaustive `match` on it outside the crate needs the new arm.
+
 ## [0.2.2] - 2026-10-15
 
 ### Fixed
