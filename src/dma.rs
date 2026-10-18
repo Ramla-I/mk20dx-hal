@@ -1351,7 +1351,7 @@ mod async_impl {
         /// and started before calling this.
         ///
         /// The caller must wire the corresponding `DMA_CH{N}` interrupt to
-        /// [`on_dmaN_interrupt()`] and unmask it in the NVIC.
+        /// `on_dmaN_interrupt()` (for example [`on_dma0_interrupt()`]) and unmask it in the NVIC.
         pub async fn wait_complete(&mut self) -> Result<(), DmaError> {
             self.enable_interrupt();
             let result = core::future::poll_fn(|cx| {

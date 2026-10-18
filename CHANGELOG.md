@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+0.3.0, not 0.2.3: `DmaError` has a new variant (see Added), which breaks an
+exhaustive `match` on it.
+
 ### Fixed
+
+- `Spi::wait_tx_complete` returned while the last frame still shifted.
+  TCF is set by every frame, and the one an earlier frame left set ended
+  the wait at once. The callers then flushed the FIFOs, the last frame's
+  RX byte landed in the RX FIFO after the flush, and the next byte
+  transfer read it: every SPI read after a DMA transfer was one byte late.
+  The call overhead between crates mostly hid the race; with LTO it hit on
+  every transfer (FLXS1: button reads shifted, flash reads wrong). It now
+  clears TCF once the TX FIFO is empty and waits for the last frame's TCF,
+  bounded for a frame that ended before the clear.
+- The blocking `transfer_byte` (`SpiBus` and the byte helpers) and the
+  async one drop a byte left in the RX FIFO before the push (MCR
+  `CLR_RXF`); the async one also waits for RFDF before it reads POPR (TCF
+  can come first).
 
 - `DmaChannel::set_source` now clears the same source from every other
   DMAMUX channel first (CHCFG = 0). The K20 reference manual says two
@@ -21,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Feature `usb-endpoints-4`: the USB bus has endpoints 0-3 in place of
+  0-15, and its buffer pool is 1 KB in place of 4 KB (four 64-byte buffers
+  per endpoint). Enough for EP0 and three more endpoint numbers, for
+  example a USB-MIDI device (EP0, one bulk OUT, one bulk IN). Default
+  unchanged.
 - `DmaReadTransfer::wait_timeout(max_cycles)` and
   `DmaTransfer::wait_timeout(max_cycles)`: the same checks as `wait()`,
   then a limit in DWT cycles. On the limit they return

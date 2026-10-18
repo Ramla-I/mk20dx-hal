@@ -238,7 +238,7 @@ mod async_impl {
         ///
         /// Configures the PIT channel, enables its interrupt, and awaits
         /// completion. The caller must wire the corresponding `PIT{N}`
-        /// interrupt to [`on_pitN_interrupt()`] and unmask it in the NVIC.
+        /// interrupt to `on_pitN_interrupt()` (for example [`on_pit0_interrupt()`]) and unmask it in the NVIC.
         pub async fn delay_us(&mut self, us: u32) {
             if us == 0 {
                 return;

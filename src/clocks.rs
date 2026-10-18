@@ -90,7 +90,7 @@ impl Mcg {
     /// - **mk20d5** (Teensy 3.0): 48 MHz core, 48 MHz bus, 24 MHz flash
     ///
     /// For mk20d7, this is equivalent to `freeze_at(ClockSpeed::Mhz72, ..)`.
-    /// Use [`freeze_at`](Mcg::freeze_at) to select 96 or 120 MHz overclock
+    /// Use `freeze_at` (mk20d7 only) to select 96 or 120 MHz overclock
     /// presets on Teensy 3.1/3.2.
     ///
     /// Consumes the OSC peripheral. Borrows SIM since other modules also need it.

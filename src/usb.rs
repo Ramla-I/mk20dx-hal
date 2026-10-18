@@ -1,7 +1,8 @@
 //! USB device driver for the Kinetis USB-FS controller.
 //!
 //! Implements the [`usb_device::bus::UsbBus`] trait using the hardware BDT
-//! (Buffer Descriptor Table) with ping-pong buffering. Supports 16 endpoints,
+//! (Buffer Descriptor Table) with ping-pong buffering. Supports 16 endpoints
+//! (4 with the `usb-endpoints-4` feature, 1 KB of buffers in place of 4 KB),
 //! each bidirectional with EVEN/ODD banks.
 //!
 //! Both MK20D5 (Teensy 3.0) and MK20D7 (Teensy 3.1/3.2) have identical USB0
