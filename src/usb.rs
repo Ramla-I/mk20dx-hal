@@ -120,7 +120,15 @@ use usb_device::{UsbDirection, UsbError};
 // Constants
 // ---------------------------------------------------------------------------
 
+/// Endpoints 0..NUM_ENDPOINTS, each with a BDT slot and four 64-byte
+/// buffers (256 B of RAM per endpoint). The `usb-endpoints-4` feature keeps
+/// 4 (enough for a device with EP0 and up to 3 more endpoint numbers) and
+/// saves 3 KB; the hardware does not touch the BDT of an endpoint that is
+/// not enabled in ENDPTn.
+#[cfg(not(feature = "usb-endpoints-4"))]
 const NUM_ENDPOINTS: usize = 16;
+#[cfg(feature = "usb-endpoints-4")]
+const NUM_ENDPOINTS: usize = 4;
 const EP_BUF_SIZE: usize = 64;
 
 // BDT descriptor bits (CPU → USB direction)
@@ -179,7 +187,7 @@ struct BufferDescriptor {
     addr: u32,
 }
 
-/// Full BDT: 16 endpoints × 2 directions × 2 ping-pong = 64 entries.
+/// BDT: NUM_ENDPOINTS × 2 directions × 2 ping-pong entries.
 /// Must be 512-byte aligned.
 #[repr(C, align(512))]
 struct Bdt {
@@ -194,7 +202,7 @@ static mut BDT: Bdt = Bdt {
 // Endpoint buffer pool
 // ---------------------------------------------------------------------------
 
-/// Static buffer pool — 64 buffers of 64 bytes each, 4-byte aligned.
+/// Static buffer pool — NUM_ENDPOINTS × 4 buffers of 64 bytes, 4-byte aligned.
 #[repr(C, align(4))]
 struct EpBufPool {
     bufs: [[u8; EP_BUF_SIZE]; NUM_ENDPOINTS * 4],

@@ -114,6 +114,12 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
 
 // ----- PUSHR Packing -----
 
+/// The bound of `wait_tx_complete`'s wait for the last frame's TCF, in SR
+/// reads (about 5 CPU cycles each at 120 MHz): about 10,000 cycles, more
+/// than one 8-bit frame at 1 MHz (960 cycles). Reached only when the frame
+/// ended before TCF was cleared.
+const WAIT_LAST_FRAME_SPINS: u32 = 2000;
+
 /// Build a PUSHR command word from TX data and control fields.
 ///
 /// PUSHR layout:
@@ -236,6 +242,10 @@ macro_rules! spi_impl {
             fn transfer_byte(byte: u8) -> Result<u8, Error> {
                 let spi = Self::regs();
 
+                // A byte left in the RX FIFO (a frame that ended after the
+                // last flush) would be read as this transfer's byte.
+                Self::drop_stale_rx();
+
                 // Wait for TX FIFO space (no timeout — assumes responsive hardware)
                 while spi.sr().read().tfff().is_full() {}
                 // Clear TFFF (w1c)
@@ -266,6 +276,15 @@ macro_rules! spi_impl {
                 let data = spi.popr().read().rxdata().bits() as u8;
                 spi.sr().write(|w| w.rfdf().not_empty());
                 Ok(data)
+            }
+
+            /// Empty the RX FIFO and clear RFDF and RFOF when it holds a byte.
+            fn drop_stale_rx() {
+                let spi = Self::regs();
+                if spi.sr().read().rxctr().bits() != 0 {
+                    spi.mcr().modify(|_, w| w.clr_rxf().clear());
+                    spi.sr().write(|w| w.rfdf().not_empty().rfof().overflow());
+                }
             }
 
             /// Return the TX (PUSHR) register address for DMA configuration.
@@ -317,10 +336,24 @@ macro_rules! spi_impl {
 
             /// Wait for TX FIFO to drain and last frame to shift out.
             /// Call after DMA to ensure data is on the wire before deasserting CS.
+            ///
+            /// TCF is set by every frame, so the one an earlier frame left
+            /// set is cleared once the FIFO is empty (the last frame is then
+            /// in the shifter), and the wait is for the TCF of that last
+            /// frame. Without the clear the wait ended while the last frame
+            /// still shifted: its RX byte then landed in the RX FIFO after
+            /// the caller's flush, and the next byte transfer read it.
+            /// `WAIT_LAST_FRAME_SPINS` bounds the wait for the case where
+            /// the last frame ended before the clear (an interrupt between
+            /// the two reads).
             pub fn wait_tx_complete(&self) {
                 let spi = Self::regs();
                 while spi.sr().read().txctr().bits() != 0 {}
-                while !spi.sr().read().tcf().is_complete() {}
+                spi.sr().write(|w| w.tcf().complete());
+                let mut spins = 0u32;
+                while !spi.sr().read().tcf().is_complete() && spins < WAIT_LAST_FRAME_SPINS {
+                    spins += 1;
+                }
                 spi.sr().write(|w| w.tcf().complete());
             }
 
@@ -621,6 +654,9 @@ mod async_impl {
                 async fn transfer_byte_async(byte: u8) -> Result<u8, Error> {
                     let spi = Self::regs();
 
+                    // As in `transfer_byte`: no stale RX byte before the push.
+                    Self::drop_stale_rx();
+
                     // Wait for TX FIFO space
                     while spi.sr().read().tfff().is_full() {}
                     spi.sr().write(|w| w.tfff().not_full());
@@ -672,6 +708,10 @@ mod async_impl {
                         spi.sr().write(|w| w.rfdf().not_empty());
                         return Err(Error::Overrun);
                     }
+
+                    // TCF can be seen before the received byte is in the RX
+                    // FIFO; wait for it.
+                    while spi.sr().read().rfdf().is_empty() {}
 
                     // Read POPR BEFORE clearing RFDF — order matters.
                     // Clearing RFDF first causes re-assertion (FIFO non-empty),
