@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `DmaChannel::set_source` now clears the same source from every other
+  DMAMUX channel first (CHCFG = 0). The K20 reference manual says two
+  CHCFG registers with the same SOURCE give unpredictable behaviour, even
+  when one has ENBL clear, and nothing cleared a source after a transfer.
+  Found on the FLXS1: SPI0_TX was on for the display (1), DAC (2) and
+  flash TX (6) channels, and the flash read on channels 6/7 lost RX bytes,
+  so it never completed. Two drivers that share a source must each call
+  `set_source` before each transfer and must not run at the same time.
+  The scan reads CHCFG as 4 words, about 0.3 us at 120 MHz.
+
 ### Added
 
 - `DmaReadTransfer::wait_timeout(max_cycles)` and

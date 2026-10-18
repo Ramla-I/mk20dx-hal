@@ -47,6 +47,29 @@ fn dmamux_regs() -> &'static pac::dmamux::RegisterBlock {
     unsafe { &*pac::Dmamux::PTR }
 }
 
+/// Clear `source` from every DMAMUX channel except `keep` (CHCFG = 0).
+///
+/// The K20 reference manual (DMAMUX chapter): two CHCFG registers with the
+/// same SOURCE give unpredictable behaviour, even when one has ENBL clear.
+/// Seen on the FLXS1: SPI0_TX left on the display (1) and DAC (2) channels
+/// made a SPI0 read on channels 6/7 lose RX bytes, so it never completed.
+/// The 16 byte-wide CHCFG registers are read as 4 words (a word read gives
+/// the same bytes in order, checked on an MK20DX256); only a channel that
+/// matches is written, one byte.
+fn clear_source_elsewhere(source: u8, keep: usize) {
+    let base = pac::Dmamux::PTR as *const u32;
+    for word in 0..NUM_CHANNELS.div_ceil(4) {
+        // SAFETY: word < NUM_CHANNELS / 4 stays inside the CHCFG array.
+        let v = unsafe { core::ptr::read_volatile(base.add(word)) };
+        for byte in 0..4 {
+            let ch = word * 4 + byte;
+            if ch < NUM_CHANNELS && ch != keep && ((v >> (8 * byte)) as u8 & 0x3F) == source {
+                dmamux_regs().chcfg(ch).write(|w| w);
+            }
+        }
+    }
+}
+
 /// Map channel number to DCHPRI array index.
 ///
 /// DCHPRI registers are byte-swapped within 32-bit groups:
@@ -388,12 +411,21 @@ impl<const CH: u8> DmaChannel<CH> {
 
     /// Set the DMAMUX request source for this channel.
     ///
-    /// Disables the channel in the DMAMUX, writes the new source, then
-    /// re-enables it. The hardware requires the channel to be disabled
-    /// before changing the source.
+    /// First clears the same source from every other channel: one source
+    /// may be routed to one channel only (K20 RM, DMAMUX: two CHCFG with the
+    /// same SOURCE are unpredictable, even with ENBL clear). Two drivers
+    /// that share a source (for example SPI0_TX for a display and a DAC)
+    /// must each call `set_source` before each of their transfers, and the
+    /// caller must not let them run at the same time (the FLXS1 holds the
+    /// SPI bus lock). Then disables this channel in the DMAMUX, writes the
+    /// new source and re-enables it; the hardware requires the channel to
+    /// be disabled before changing the source. About 0.3 us at 120 MHz.
     pub fn set_source(&mut self, source: DmaSource) {
         let dmamux = dmamux_regs();
         let ch = CH as usize;
+        if source.0 & 0x3F != 0 {
+            clear_source_elsewhere(source.0 & 0x3F, ch);
+        }
         // Disable channel before changing source
         dmamux.chcfg(ch).write(|w| w);
         // Write source and enable
@@ -405,6 +437,8 @@ impl<const CH: u8> DmaChannel<CH> {
     }
 
     /// Disable the DMAMUX source for this channel (stops hardware requests).
+    ///
+    /// Writes CHCFG = 0, so the source is free for another channel.
     pub fn disable_source(&mut self) {
         dmamux_regs().chcfg(CH as usize).write(|w| w);
     }
