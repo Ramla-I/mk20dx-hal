@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spi::Baud`: the CTAR0 baud fields (BR, PBR, DBR) for one SCK rate,
+  from `calc_baud` (`Baud::new(&clocks, hz)`, `Baud::from_bus_clk`,
+  `Baud::rate`).
+- `Spi::baud` and `Spi::set_baud`: read, or change, the SCK rate of CTAR0
+  between transactions, for devices on one bus that need different rates.
+  `set_baud` halts the module to the Stopped state for the write (K20 RM
+  45.4.1) and runs it again; the same rate again is one register read.
+
 ## [0.3.0] - 2026-10-18
 
 0.3.0, not 0.2.3: `DmaError` has a new variant (see Added), which breaks an

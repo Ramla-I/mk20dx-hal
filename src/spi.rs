@@ -112,6 +112,39 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     (best_br, best_pbr, best_dbr)
 }
 
+/// The CTAR0 baud fields (BR, PBR, DBR) for one SCK rate, from [`calc_baud`]:
+/// the fastest rate not above the target. For [`Spi::set_baud`], when the
+/// devices on one bus need different rates. With DBR set and PBR not /2 the
+/// SCK duty cycle is not 50/50 (K20 RM Table 45-38): check the device's
+/// clock high and low times for such a rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Baud {
+    br: u8,
+    pbr: u8,
+    dbr: bool,
+}
+
+impl Baud {
+    /// The fields for `target` at the bus clock of `clocks`.
+    pub fn new(clocks: &Clocks, target: Hertz) -> Self {
+        Self::from_bus_clk(clocks.bus_clk().to_Hz(), target.to_raw())
+    }
+
+    /// The fields for `target` Hz at a bus clock of `bus_clk` Hz.
+    pub fn from_bus_clk(bus_clk: u32, target: u32) -> Self {
+        let (br, pbr, dbr) = calc_baud(bus_clk, target);
+        Baud { br, pbr, dbr }
+    }
+
+    /// The SCK rate in Hz these fields give at a bus clock of `bus_clk` Hz.
+    pub fn rate(&self, bus_clk: u32) -> u32 {
+        let mult: u64 = if self.dbr { 2 } else { 1 };
+        let div = PBR_PRESCALERS[self.pbr as usize] as u64 * BR_SCALERS[self.br as usize] as u64;
+        (bus_clk as u64 * mult / div) as u32
+    }
+}
+
 // ----- PUSHR Packing -----
 
 /// The bound of `wait_tx_complete`'s wait for the last frame's TCF, in SR
@@ -318,6 +351,40 @@ macro_rules! spi_impl {
             /// When enabled, incoming data shifts in even when the FIFO is full.
             pub fn set_rooe(&mut self, enabled: bool) {
                 Self::regs().mcr().modify(|_, w| if enabled { w.rooe().shift_in() } else { w.rooe().ignore() });
+            }
+
+            /// The CTAR0 baud fields now in use.
+            pub fn baud(&self) -> Baud {
+                let r = Self::regs().$ctar_fn(0).read();
+                Baud { br: r.br().bits(), pbr: r.pbr().bits(), dbr: r.dbr().bit_is_set() }
+            }
+
+            /// Change the SCK rate of CTAR0 to `baud`, for the next frame on.
+            /// The caller holds the bus with no frame queued (as after a
+            /// `flush`). The module goes to the Stopped state for the write
+            /// (K20 RM 45.4.1: the safe state for configuration writes; it
+            /// stops at the next frame boundary) and runs again after it.
+            /// The same fields again cost one register read.
+            pub fn set_baud(&mut self, baud: Baud) {
+                if self.baud() == baud {
+                    return;
+                }
+                let spi = Self::regs();
+                spi.mcr().modify(|_, w| w.halt().halted());
+                while spi.sr().read().txrxs().bit_is_set() {}
+                spi.$ctar_fn(0).modify(|_, w| {
+                    let w = match baud.pbr {
+                        0 => w.pbr().div2(),
+                        1 => w.pbr().div3(),
+                        2 => w.pbr().div5(),
+                        _ => w.pbr().div7(),
+                    };
+                    let w = if baud.dbr { w.dbr().double() } else { w.dbr().normal() };
+                    // SAFETY: br is a 4-bit field and calc_baud returns an
+                    // index below 16.
+                    unsafe { w.br().bits(baud.br) }
+                });
+                spi.mcr().modify(|_, w| w.halt().running());
             }
 
             /// Clear all W1C status flags (TCF, EOQF, TFUF, RFOF, TFFF, RFDF).
