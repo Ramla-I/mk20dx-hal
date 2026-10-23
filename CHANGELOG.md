@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between transactions, for devices on one bus that need different rates.
   `set_baud` halts the module to the Stopped state for the write (K20 RM
   45.4.1) and runs it again; the same rate again is one register read.
+- `spi::frame_bus_cycles`: the bus cycles of one frame for given CTAR
+  fields (bits, SCK period, the three delays).
+
+### Fixed
+
+- `Spi::wait_tx_complete` ran to its bound when the last frame had
+  already ended before its TCF clear, which at 15-30 MHz is common (an
+  RX DMA that took every byte always ends that way). The fixed bound of
+  2000 SR reads, sized for 1 MHz, cost about 440 us each time (FLXS1:
+  every flash chunk read and most display lines). The bound is now two
+  frames at CTAR0's timing, in SR reads (each takes at least one bus
+  cycle).
 
 ## [0.3.0] - 2026-10-18
 

@@ -147,11 +147,15 @@ impl Baud {
 
 // ----- PUSHR Packing -----
 
-/// The bound of `wait_tx_complete`'s wait for the last frame's TCF, in SR
-/// reads (about 5 CPU cycles each at 120 MHz): about 10,000 cycles, more
-/// than one 8-bit frame at 1 MHz (960 cycles). Reached only when the frame
-/// ended before TCF was cleared.
-const WAIT_LAST_FRAME_SPINS: u32 = 2000;
+/// The bus cycles of one frame with the CTAR fields given: the frame's bits
+/// at the SCK period, plus the PCS-to-SCK, after-SCK and after-transfer
+/// delays (K20 RM 45.4.2: each is PRESCALER x 2^(SCALER + 1) bus cycles).
+pub fn frame_bus_cycles(bits: u32, br: u8, pbr: u8, dbr: bool, delays: [(u8, u8); 3]) -> u32 {
+    const PRE: [u32; 4] = [1, 3, 5, 7];
+    let period = PBR_PRESCALERS[pbr as usize] as u32 * BR_SCALERS[br as usize] as u32 / if dbr { 2 } else { 1 };
+    let delay: u32 = delays.iter().map(|&(pre, scale)| PRE[pre as usize] << (scale as u32 + 1)).sum();
+    bits * period + delay
+}
 
 /// Build a PUSHR command word from TX data and control fields.
 ///
@@ -410,18 +414,40 @@ macro_rules! spi_impl {
             /// frame. Without the clear the wait ended while the last frame
             /// still shifted: its RX byte then landed in the RX FIFO after
             /// the caller's flush, and the next byte transfer read it.
-            /// `WAIT_LAST_FRAME_SPINS` bounds the wait for the case where
-            /// the last frame ended before the clear (an interrupt between
-            /// the two reads).
+            /// The wait is bounded for the case where the last frame ended
+            /// before the clear: at a fast SCK the frame is often over by
+            /// then, and no TCF follows. The bound is two frames at CTAR0's
+            /// timing, counted in SR reads, each of which takes at least one
+            /// bus cycle; a fixed bound sized for 1 MHz cost about 440 us of
+            /// every such wait at 15-30 MHz.
             pub fn wait_tx_complete(&self) {
                 let spi = Self::regs();
                 while spi.sr().read().txctr().bits() != 0 {}
                 spi.sr().write(|w| w.tcf().complete());
+                let bound = Self::last_frame_spins();
                 let mut spins = 0u32;
-                while !spi.sr().read().tcf().is_complete() && spins < WAIT_LAST_FRAME_SPINS {
+                while !spi.sr().read().tcf().is_complete() && spins < bound {
                     spins += 1;
                 }
                 spi.sr().write(|w| w.tcf().complete());
+            }
+
+            /// Two frames at CTAR0's timing, in bus cycles: the bound of
+            /// `wait_tx_complete`'s TCF wait in SR reads.
+            fn last_frame_spins() -> u32 {
+                let r = Self::regs().$ctar_fn(0).read();
+                let frame = frame_bus_cycles(
+                    r.fmsz().bits() as u32 + 1,
+                    r.br().bits(),
+                    r.pbr().bits(),
+                    r.dbr().bit_is_set(),
+                    [
+                        (r.pcssck().bits(), r.cssck().bits()),
+                        (r.pasc().bits(), r.asc().bits()),
+                        (r.pdt().bits(), r.dt().bits()),
+                    ],
+                );
+                2 * frame
             }
 
             /// Start a DMA-backed write transfer.
