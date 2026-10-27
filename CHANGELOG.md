@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- USB: an OUT endpoint stopped receiving for good when both RX banks
+  completed before the class read one (a class that holds off its reads
+  for flow control, or two packets in one interrupt). `poll()` kept only
+  the last bank, so `read()` re-armed it and left the other bank owned
+  by the CPU; the controller then NAKed every later packet. `poll()` now
+  keeps the second bank behind the first, and `read()` hands it out next.
 - `Spi::wait_tx_complete` ran to its bound when the last frame had
   already ended before its TCF clear, which at 15-30 MHz is common (an
   RX DMA that took every byte always ends that way). The fixed bound of

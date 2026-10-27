@@ -297,6 +297,9 @@ struct EndpointState {
     rx_ready: bool,
     // Which bank the completed RX data is in
     rx_complete_odd: bool,
+    // A second bank completed before the first was read (both banks hold
+    // data): its bank. read() hands it out after the first.
+    rx_queued: Option<bool>,
     // Whether this was a SETUP packet
     rx_setup: bool,
 }
@@ -312,6 +315,7 @@ impl EndpointState {
             tx_odd: false,
             rx_ready: false,
             rx_complete_odd: false,
+            rx_queued: None,
             rx_setup: false,
         }
     }
@@ -497,6 +501,7 @@ impl UsbBus {
         ep0.tx_data_toggle = false;
         ep0.tx_odd = false;
         ep0.rx_ready = false;
+        ep0.rx_queued = None;
         ep0.rx_setup = false;
         ep0.stalled_in = false;
         ep0.stalled_out = false;
@@ -696,6 +701,7 @@ impl UsbBusTrait for UsbBus {
             inner.endpoints[i].tx_data_toggle = false;
             inner.endpoints[i].tx_odd = false;
             inner.endpoints[i].rx_ready = false;
+            inner.endpoints[i].rx_queued = None;
             inner.endpoints[i].rx_setup = false;
             inner.endpoints[i].stalled_in = false;
             inner.endpoints[i].stalled_out = false;
@@ -867,6 +873,13 @@ impl UsbBusTrait for UsbBus {
         // counter, which desynchronises after the first packet.
         self.arm_rx(ep, odd, self.rx_bank_data1(ep, odd));
 
+        // The other bank completed too while this one waited: it is next.
+        let state = &mut self.inner_mut().endpoints[ep];
+        if let Some(next) = state.rx_queued.take() {
+            state.rx_complete_odd = next;
+            state.rx_ready = true;
+        }
+
         Ok(count)
     }
 
@@ -1035,6 +1048,7 @@ impl UsbBusTrait for UsbBus {
                     state.rx_setup = true;
                     state.rx_ready = true;
                     state.rx_complete_odd = is_odd;
+                    state.rx_queued = None;
                     // After SETUP, unfreeze (clear TXSUSPENDTOKENBUSY).
                     // Whole-register write — see reset(). This both clears
                     // the freeze and leaves USBENSOFEN set.
@@ -1051,8 +1065,18 @@ impl UsbBusTrait for UsbBus {
                 }
 
                 ep_out |= 1 << ep;
-                state.rx_ready = true;
-                state.rx_complete_odd = is_odd;
+                // Both banks can complete before the class reads one (a
+                // class that holds off its reads for flow control). Keep
+                // the second in order behind the first: overwriting
+                // `rx_complete_odd` would leave the first bank owned by the
+                // CPU and never re-armed, and the controller would NAK
+                // every later OUT packet on this endpoint.
+                if state.rx_ready && !state.rx_setup {
+                    state.rx_queued = Some(is_odd);
+                } else {
+                    state.rx_ready = true;
+                    state.rx_complete_odd = is_odd;
+                }
             }
         }
 
