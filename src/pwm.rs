@@ -1864,7 +1864,7 @@ impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
         let ftm = ftm_regs::<FTM>();
 
         // FILTER takes effect immediately and must only be written while
-        // CH0..CH3 are not in input modes (K20 RM, FTMx_FILTER). 
+        // CH0..CH3 are not in input modes (K20P64M72SF1RM, FTMx_FILTER). 
         // Temporarily take the decoder and any input-capture channel (MSB:MSA=00,
         // ELS!=00) on CH0..CH3 out of input mode for the write, then restore them. 
         // The decoder uses CH0/CH1 as inputs without setting CnSC, so it is disabled via QUADEN.
