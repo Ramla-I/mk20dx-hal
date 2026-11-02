@@ -617,8 +617,8 @@ USB requires exactly 48 MHz. Derived from PLL via SIM:
 ### 11.3 Implementation
 
 - `UsbBus` struct with `UnsafeCell<Inner>` for interior mutability (trait requires `&self`)
-- Static BDT (512-byte aligned) and buffer pool (64×64 bytes)
-- `UsbBusExt` extension trait: `pac::Usb0.usb_bus(&sim, &clocks)` → `UsbBus` (`&Clocks` since 0.2.0)
+- Static BDT (512-byte aligned) and buffer pool (64×64 bytes). Since 0.3.1: two buffers per allocated endpoint direction, 6 of them in the BDT tail with 4 endpoints, and `UsbBus::with_buffers` for application-owned buffers
+- `UsbBusExt` extension trait: `pac::Usb0.usb_bus(&sim, &clocks)` → `UsbBus` (`&Clocks` since 0.2.0); `UsbBus::with_buffers(usb0, &sim, &clocks, bufs)` since 0.3.1
 - Full `usb_device::bus::UsbBus` trait implementation
 - Compatible with `usb-device` class crates (usbd-serial, usbd-hid, etc.)
 

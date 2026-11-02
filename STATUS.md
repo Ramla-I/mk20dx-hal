@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-11-02 (0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
+**Last updated:** 2026-11-02 (0.3.1: no 64-bit divide; USB packet buffers per allocated direction, 6 in the BDT tail, `UsbBus::with_buffers`. 0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -297,13 +297,13 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
 - [x] `UsbBus` struct implementing `usb_device::bus::UsbBus` trait (v0.3)
 - [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(&sim, &clocks)` → `UsbBus`
-- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong; with 4 endpoints the 384 B after the table hold 6 packet buffers (Unreleased)
-- [x] Packet buffers — two per allocated endpoint direction (EP0 four), from the BDT tail, then the HAL pool (`usb_bus()`) or the application's (`UsbBus::with_buffers`, Unreleased)
+- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong; with 4 endpoints the 384 B after the table hold 6 packet buffers (0.3.1)
+- [x] Packet buffers — two per allocated endpoint direction (EP0 four), from the BDT tail, then the HAL pool (`usb_bus()`) or the application's (`UsbBus::with_buffers`, 0.3.1)
 - [x] USB 48 MHz clock configuration (SIM SOPT2/CLKDIV2/SCGC4)
   - USBFRAC/USBDIV derived from `Clocks`: 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - [x] Endpoint allocation with type/direction tracking
 - [x] Ping-pong buffer management (EVEN/ODD banks); 0.3.0 keeps a second completed RX bank, so an OUT endpoint does not stall when the class holds off its reads
-- [x] Feature `usb-endpoints-4` (0.3.0): endpoints 0-3 only, 1 KB buffer pool in place of 4 KB
+- [x] Feature `usb-endpoints-4` (0.3.0): endpoints 0-3 only. USB RAM since 0.3.1: 1,152 B in place of 4,608 B with `usb_bus()`, 512 B + 64 B per buffer past the 6 in the BDT tail with `UsbBus::with_buffers`
 - [x] DATA0/DATA1: RX EVEN=DATA0, ODD=DATA1 (bulk/interrupt); EP0 re-arms DATA1. TX toggle per endpoint
 - [x] TOKDNE FIFO processing (read STAT before clearing ISTAT)
 - [x] SETUP token detection and data toggle reset
@@ -319,15 +319,15 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
 
-### 2026-11-02 — RAM and flash: no 64-bit divide, USB buffers per direction (Unreleased)
+### 2026-11-02 — RAM and flash: no 64-bit divide, USB buffers per direction (0.3.1)
 
-Branch `size-reductions`. Run on the FLXS1 board (MK20DX256, J-Link), all
+Run on the FLXS1 board (MK20DX256, J-Link), all
 passed: `delay` 6/6 (zero delay 35 ticks, budget 100), `timer` 10/10,
 `lptmr` 8/8, `uart` 4/4, `spi_baud` 5/5, `usb` 6/6, `usb_bufs` 5/5 with 16
 endpoints and 5/5 with `usb-endpoints-4`, `usb_irq` 4/4 with the host in
 both layouts (4 Note On received; ENDPT1 = 0x19 OUT only, ENDPT2 = 0x15 IN
 only, the usb_dev.c values). With `usb-endpoints-4`, EP0 and EP1 OUT receive
-into the BDT-tail buffers. Sizes: see CHANGELOG (Unreleased).
+into the BDT-tail buffers. Sizes: see CHANGELOG (0.3.1).
 
 ### 2026-11-02 — 0.3.0 released (SPI, DMA, USB fixes found on flxs1)
 
@@ -458,6 +458,10 @@ endpoints whatever the class uses. On the FLXS1 that cut the application's
 stack from about 13.5 KB to 6 KB. Sizing the pool by the endpoints actually
 allocated is wanted; a MIDI device needs 3.
 
+Closed in 0.3.1: `usb-endpoints-4` (0.3.0) cut it to 1,536 B, and 0.3.1 gives
+buffers per allocated direction, keeps 6 in the BDT tail and adds
+`UsbBus::with_buffers` (640 B for EP0 + EP1 OUT/IN).
+
 ---
 
 ### 2026-09-11 — first real hardware bring-up attempt (superseded by the entry above)
@@ -505,7 +509,7 @@ Proof the same board and cable enumerate: the vendor C firmware
 A second, independent limitation: `EP_BUFS` plus the BDT is a fixed 4.6 KB
 of statics for 16 endpoints whatever the class uses. On the FLXS1 that cut
 the application's stack from about 13.5 KB to 6 KB. Sizing the pool by the
-endpoints actually allocated is wanted; a MIDI device needs 3.
+endpoints actually allocated is wanted; a MIDI device needs 3. (Closed in 0.3.1, see above.)
 
 Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 
@@ -808,4 +812,6 @@ Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
 | 2026-02-22 | HAL exports `on_*_interrupt()` functions (not `#[interrupt]` handlers) | Avoids linker conflicts — user wires ISR to HAL handler. Standard pattern in embassy-stm32, embassy-nrf. |
 | 2026-02-22 | `embassy-sync` AtomicWaker for async (not custom waker) | Battle-tested, executor-agnostic, minimal footprint. Works with Embassy, RTIC, or bare executors. |
 | 2026-02-22 | Optional `async` feature flag (not always-on) | Keeps blocking-only builds dependency-free. Users opt in to embassy-sync + embedded-hal-async. |
+| 2026-11-02 | USB packet buffers in the 384 B after a 4-endpoint BDT (0.3.1) | The 512-byte alignment makes the BDT type 512 B; with 4 endpoints only 128 B are the table. The RM does not say the controller leaves the entries of disabled endpoints alone; Teensyduino depends on it (its table is `(NUM_ENDPOINTS+1)*4` entries with `.dmabuffers`, `.usbbuffers` and `.data` after it). Passed `usb_bufs` and `usb_irq` with a host in that layout. |
+| 2026-11-02 | `UsbBus::with_buffers` as an inherent constructor, not a new `UsbBusExt` method | A new required method on the public, unsealed `UsbBusExt` would break an outside implementor; the constructor only adds API, so 0.3.1. |
 | 2026-11-02 | One 0.3.0 release for the unpublished 0.3.0 section and the Unreleased changes (not 0.3.0 then 0.3.1) | 0.3.0 was never published. The Unreleased changes only add API and fix 0.3.0 code, and a separate 0.3.0 would ship the 440 us `wait_tx_complete` bound and the USB RX stall. |

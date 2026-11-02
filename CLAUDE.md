@@ -128,6 +128,7 @@ Following the dominant embedded Rust ecosystem pattern (stm32f4xx-hal, nrf-hal, 
 | `AdcExt` | `pac::Adc0`, etc. | `adc(clocks, sim)` | `Adc<Instance>` |
 | `DmaExt` | `pac::Dma` | `split(dmamux, sim)` | `DmaChannels` |
 | `UsbBusExt` | `pac::Usb0` | `usb_bus(&sim, &clocks)` | `UsbBus` |
+| (constructor) | `pac::Usb0` | `UsbBus::with_buffers(usb0, &sim, &clocks, bufs)`: packet buffers from the application | `UsbBus` |
 
 ```rust
 use mk20dx_hal::prelude::*;
