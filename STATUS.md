@@ -329,6 +329,15 @@ both layouts (4 Note On received; ENDPT1 = 0x19 OUT only, ENDPT2 = 0x15 IN
 only, the usb_dev.c values). With `usb-endpoints-4`, EP0 and EP1 OUT receive
 into the BDT-tail buffers. Sizes: see CHANGELOG (0.3.1).
 
+flxs1 (`usb-endpoints-4`, EP0 + EP1 OUT/IN, `usb_bus()`) on the same source
+(`6208ee1`): `cargo bench-hw` 49/49 on the FLXS1 board, and the ignored
+`midi_clock_out_usb` passed (USB MIDI from the device to the host: FA/F8/FC/FB
+in order, FA to the first F8 2.6-2.75 ms). With `usb_irq` (host to device)
+this covers both directions on the new buffers. flxs1 sizes: static RAM
+49,052 -> 48,688 B, flash +108 B. One first attach after the testsuite image
+failed ("Failed to write register DRW", a known first-attach problem after a
+foreign image); the rerun passed.
+
 ### 2026-11-02 — 0.3.0 released (SPI, DMA, USB fixes found on flxs1)
 
 One release for the 0.3.0 changelog section (dated 2026-10-18, never
