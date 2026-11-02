@@ -29,7 +29,7 @@ Both are ARM Cortex-M4 (no FPU), target `thumbv7em-none-eabi`.
 
 ## Sibling Project: mk20dx-pac
 
-The PAC lives at `../mk20dx-pac/`. It is mature (Phase 5 complete, Phase 6 publishing in progress), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT, FTM, ADC, MCG, SIM, DMA ATTR, SPI, UART, and SIM SCGC fields — the HAL uses these directly instead of raw bit patterns.
+The PAC lives at `../mk20dx-pac/`. It is mature (published on crates.io as `mk20d5-pac` / `mk20d7-pac` 0.1.x; the HAL depends on those versions, not on the path), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT, FTM, ADC, MCG, SIM, DMA ATTR, SPI, UART, and SIM SCGC fields — the HAL uses these directly instead of raw bit patterns.
 
 Key PAC documentation:
 - `../mk20dx-pac/CLAUDE.md` — PAC project guide, build commands, SVD patching conventions

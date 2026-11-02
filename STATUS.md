@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-10-15 (0.2.2: ADC multi-channel scan fixes). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
+**Last updated:** 2026-11-02 (0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## PAC Dependency Status
 
-The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in progress). See `../mk20dx-pac/docs/STATUS.md` for details.
+The `mk20dx-pac` crates are mature and published on crates.io as `mk20d5-pac` and `mk20d7-pac` (0.1.x); the HAL takes them from crates.io. See `../mk20dx-pac/docs/STATUS.md` for details.
 
 | PAC Crate | Compiles | Correctness Patches | Ergonomics Patches | Validation |
 |-----------|----------|--------------------|--------------------|------------|
@@ -35,7 +35,7 @@ The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in prog
 
 Semantic enum patches now provide named enums across PORT (MUX + bitfields), FTM, ADC, MCG, SIM SOPT2, SIM SCGC, DMA ATTR, SPI, and UART fields — the HAL uses these directly instead of raw bit patterns.
 
-PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is ready for publishing.
+PAC is dual-licensed MIT/Apache-2.0 and has a README.md per crate.
 
 ---
 
@@ -150,12 +150,16 @@ Reference: K20 ref manual chapter 35 (UART)
 - [x] `pack_pushr()` const fn — build 32-bit PUSHR command words (data + PCS + CONT + EOQ)
 - [x] MCR control: `flush_fifos()`, `set_rx_fifo()`, `set_rooe()`
 - [x] Status/request control: `clear_status()`, `disable_dma_requests()`, `wait_tx_complete()`
+  (0.3.0: clears TCF once the TX FIFO is empty and waits for the last frame's TCF, bounded by two frames at CTAR0's timing)
+- [x] Per-transaction SCK rate (0.3.0): `spi::Baud`, `Spi::baud()`, `Spi::set_baud()`, `spi::frame_bus_cycles()`
+- [x] Byte transfers drop a stale RX FIFO byte before the push (0.3.0, MCR `CLR_RXF`)
 - [x] `write_dma_pushr()` — 32-bit DMA writes to PUSHR with full command field control
 - [x] `read_dma()` — dual-channel DMA reads (TX sends dummy PUSHR words via SOFF=0, RX captures POPR bytes into buffer)
 - [x] `DmaReadTransfer<TX_CH, RX_CH>` — lifetime-safe dual-channel handle with abort-on-drop (cleans up both TX and RX channels)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (11 tests, requires PTC6→PTC7 wire)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi.rs` (5 tests, baud + pack_pushr properties)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_async_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_baud.rs` (5 tests, `set_baud` CTAR0 fields and `frame_bus_cycles` at the FLXS1 rates)
 
 Reference: K20 ref manual chapter 37 (DSPI)
 
@@ -265,8 +269,10 @@ Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 - [x] `TransferSize` enum (Bits8/Bits16/Bits32/Burst16) mapped to TCD ATTR SSIZE/DSIZE
 - [x] `TransferConfig` struct for full TCD configuration
 - [x] `DmaSource` newtype with 40+ named constants for DMAMUX routing
-- [x] `DmaError` enum (9 error variants parsed from ES register)
+- [x] `DmaError` enum (8 error variants parsed from ES register, plus `Cancelled` and `Timeout`)
 - [x] DMAMUX source routing: `set_source()`, `disable_source()`
+  (0.3.0: `set_source()` first clears the same source from every other channel; RM: two CHCFG with one SOURCE is unpredictable)
+- [x] Bounded waits (0.3.0): `DmaTransfer::wait_timeout()`, `DmaReadTransfer::wait_timeout()` (DWT cycles, `DmaError::Timeout`)
 - [x] TCD configuration: `unsafe configure()` writes all TCD registers
 - [x] Transfer control: `enable_request()`, `disable_request()`, `start()`
 - [x] Status: `is_complete()`, `has_error()`, `is_active()`, `error_status()`
@@ -296,7 +302,8 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] USB 48 MHz clock configuration (SIM SOPT2/CLKDIV2/SCGC4)
   - USBFRAC/USBDIV derived from `Clocks`: 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - [x] Endpoint allocation with type/direction tracking
-- [x] Ping-pong buffer management (EVEN/ODD banks)
+- [x] Ping-pong buffer management (EVEN/ODD banks); 0.3.0 keeps a second completed RX bank, so an OUT endpoint does not stall when the class holds off its reads
+- [x] Feature `usb-endpoints-4` (0.3.0): endpoints 0-3 only, 1 KB buffer pool in place of 4 KB
 - [x] DATA0/DATA1: RX EVEN=DATA0, ODD=DATA1 (bulk/interrupt); EP0 re-arms DATA1. TX toggle per endpoint
 - [x] TOKDNE FIFO processing (read STAT before clearing ISTAT)
 - [x] SETUP token detection and data toggle reset
@@ -309,6 +316,22 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only) and
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
+
+### 2026-11-02 — 0.3.0 released (SPI, DMA, USB fixes found on flxs1)
+
+One release for the 0.3.0 changelog section (dated 2026-10-18, never
+published) and the later Unreleased changes. See CHANGELOG.md for each item.
+Proof on hardware:
+
+- `set_baud` / `frame_bus_cycles`: `mk20dx-testsuite/tests/spi_baud.rs`, 5/5.
+- `wait_tx_complete` bound: flxs1 timings with the new bound: flash chunk
+  read 520 -> 70 us of work, display line 530-576 -> 310-334 us, button bus
+  wait 250-281 -> 31 us.
+- USB second RX bank: before the fix, the flxs1 sysex import stopped after
+  112 packets. With `b428a85`, flxs1 `tools/flxs1-bench/tests/sysex_import.rs`
+  (`a_c_dump_imports_and_loads`: 4 SysEx messages, about 11 KB) passed 4 of
+  4 runs, 2026-10-27 to 2026-11-02. The test checks that the import gets to
+  COMPLETE; it does not count USB packets.
 
 ### 2026-10-15 — ADC multi-channel scan: slot map, rate, averaging (0.2.2)
 
@@ -773,3 +796,4 @@ Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
 | 2026-02-22 | HAL exports `on_*_interrupt()` functions (not `#[interrupt]` handlers) | Avoids linker conflicts — user wires ISR to HAL handler. Standard pattern in embassy-stm32, embassy-nrf. |
 | 2026-02-22 | `embassy-sync` AtomicWaker for async (not custom waker) | Battle-tested, executor-agnostic, minimal footprint. Works with Embassy, RTIC, or bare executors. |
 | 2026-02-22 | Optional `async` feature flag (not always-on) | Keeps blocking-only builds dependency-free. Users opt in to embassy-sync + embedded-hal-async. |
+| 2026-11-02 | One 0.3.0 release for the unpublished 0.3.0 section and the Unreleased changes (not 0.3.0 then 0.3.1) | 0.3.0 was never published. The Unreleased changes only add API and fix 0.3.0 code, and a separate 0.3.0 would ship the 440 us `wait_tx_complete` bound and the USB RX stall. |
