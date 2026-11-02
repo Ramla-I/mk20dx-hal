@@ -97,8 +97,10 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     for (pbr_idx, &pbr) in PBR_PRESCALERS.iter().enumerate() {
         for (br_idx, &br) in BR_SCALERS.iter().enumerate() {
             for dbr in [false, true] {
-                let mult: u64 = if dbr { 2 } else { 1 };
-                let baud = (bus_clk as u64 * mult / (pbr as u64 * br as u64)) as u32;
+                // bus_clk * 2 / (PBR * BR) == bus_clk / (PBR * BR / 2): every
+                // BR scaler is even. 32-bit math, no 64-bit divide, no overflow.
+                let div = pbr as u32 * br as u32 / if dbr { 2 } else { 1 };
+                let baud = bus_clk / div;
                 if baud <= target && baud > best_baud {
                     best_baud = baud;
                     best_br = br_idx as u8;
@@ -139,9 +141,11 @@ impl Baud {
 
     /// The SCK rate in Hz these fields give at a bus clock of `bus_clk` Hz.
     pub fn rate(&self, bus_clk: u32) -> u32 {
-        let mult: u64 = if self.dbr { 2 } else { 1 };
-        let div = PBR_PRESCALERS[self.pbr as usize] as u64 * BR_SCALERS[self.br as usize] as u64;
-        (bus_clk as u64 * mult / div) as u32
+        // As in calc_baud: BR is even, so halving the divisor is exact. The
+        // masks keep the fields in range (they always are) without a bounds check.
+        let div = PBR_PRESCALERS[self.pbr as usize & 3] as u32 * BR_SCALERS[self.br as usize & 15] as u32
+            / if self.dbr { 2 } else { 1 };
+        bus_clk / div
     }
 }
 

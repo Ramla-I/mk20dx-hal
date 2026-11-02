@@ -31,38 +31,34 @@ impl Delay {
 
 impl DelayNs for Delay {
     fn delay_ns(&mut self, ns: u32) {
-        // Convert ns to cycles, rounding up.
+        // Convert ns to cycles, rounding up: ceil(ns * c / 1000).
         //
-        // Deliberately not `div_ceil`: on this core a u64 divide is a call to
-        // `__aeabi_uldivmod`, and `div_ceil` needs the quotient *and* the
-        // remainder where `+ 999` needs only one divide. The extra work shows
-        // up directly in `delay_ns` overhead — it pushed the zero-delay case
-        // in mk20dx-testsuite past its 100-tick budget (measured 104).
+        // In 32-bit math, not u64: on this core a u64 divide is a call to
+        // `__aeabi_uldivmod`, which links about 930 B of compiler_builtins
+        // into a firmware that has no other 64-bit divide, and is slow (the
+        // zero-delay case in mk20dx-testsuite has a 100-tick budget). With
+        // ns = q * 1000 + r the value is q * c + ceil(r * c / 1000). With
+        // c <= 120 (a 120 MHz core) both terms fit a u32, and a divide by the
+        // constant 1000 is a multiply.
         #[allow(clippy::manual_div_ceil)]
-        let cycles = (ns as u64 * self.cycles_per_us as u64 + 999) / 1000;
+        let mut remaining = {
+            let c = self.cycles_per_us;
+            (ns / 1000) * c + ((ns % 1000) * c + 999) / 1000
+        };
 
         // SysTick reload is 24 bits (max 0x00FF_FFFF = 16_777_215)
-        const MAX_RELOAD: u64 = 0x00FF_FFFF;
-        let mut remaining = cycles;
+        const MAX_RELOAD: u32 = 0x00FF_FFFF;
 
         while remaining > 0 {
-            let reload = if remaining > MAX_RELOAD {
-                MAX_RELOAD as u32
-            } else {
-                remaining as u32
-            };
+            let reload = remaining.min(MAX_RELOAD);
+            self.syst.set_reload(reload);
+            self.syst.clear_current();
+            self.syst.enable_counter();
 
-            if reload > 0 {
-                self.syst.set_reload(reload);
-                self.syst.clear_current();
-                self.syst.enable_counter();
+            while !self.syst.has_wrapped() {}
 
-                while !self.syst.has_wrapped() {}
-
-                self.syst.disable_counter();
-            }
-
-            remaining = remaining.saturating_sub(reload as u64);
+            self.syst.disable_counter();
+            remaining -= reload;
         }
     }
 }

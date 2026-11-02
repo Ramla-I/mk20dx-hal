@@ -206,8 +206,13 @@ pub struct Rx<UART> {
 ///
 /// `baud = module_clk / (16 * (SBR + BRFA/32))`
 pub fn calc_baud(module_clk: u32, baudrate: u32) -> (u16, u8) {
-    // sbr32 = module_clk * 2 / baudrate (with rounding)
-    let sbr32 = ((2 * module_clk as u64 + baudrate as u64 / 2) / baudrate as u64) as u32;
+    // sbr32 = (2 * module_clk + baudrate / 2) / baudrate, the rounded
+    // module_clk * 2 / baudrate. With module_clk = q * baudrate + r that is
+    // 2q + (2r + baudrate / 2) / baudrate: 32-bit math, no 64-bit divide, and
+    // no overflow for any module_clk.
+    let q = module_clk / baudrate;
+    let r = module_clk % baudrate;
+    let sbr32 = 2 * q + (2 * r + baudrate / 2) / baudrate;
     let sbr = (sbr32 / 32).clamp(1, 0x1FFF) as u16;
     let brfa = (sbr32 % 32) as u8;
     (sbr, brfa)

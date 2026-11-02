@@ -42,6 +42,16 @@ pub struct PitChannel<const CH: u8> {
     bus_clk: u32,
 }
 
+/// LDVAL for a period of `us` microseconds: `us * bus MHz - 1`, clamped to
+/// `u32::MAX`. 32-bit math, so no 64-bit divide (about 930 B of
+/// compiler_builtins in a firmware that has no other one). Exact because
+/// every [`Clocks`] bus clock is a whole number of MHz (36, 48 or 60).
+fn us_to_ldval(us: u32, bus_clk: u32) -> u32 {
+    debug_assert_eq!(bus_clk % 1_000_000, 0);
+    us.checked_mul(bus_clk / 1_000_000)
+        .map_or(u32::MAX, |t| t.saturating_sub(1))
+}
+
 impl<const CH: u8> PitChannel<CH> {
     /// Start the timer with a period in microseconds.
     ///
@@ -52,11 +62,7 @@ impl<const CH: u8> PitChannel<CH> {
     /// clamped to `u32::MAX` ticks. Use [`start_ticks()`](PitChannel::start_ticks)
     /// for precise control.
     pub fn start(&mut self, period: fugit::MicrosDurationU32) {
-        let us = period.as_ticks() as u64;
-        let ticks = (us * self.bus_clk as u64 / 1_000_000)
-            .saturating_sub(1)
-            .min(u32::MAX as u64) as u32;
-        self.start_ticks(ticks);
+        self.start_ticks(us_to_ldval(period.as_ticks(), self.bus_clk));
     }
 
     /// Start the timer with a raw tick count (LDVAL = ticks).
@@ -243,9 +249,7 @@ mod async_impl {
             if us == 0 {
                 return;
             }
-            let ticks = (us as u64 * self.bus_clk as u64 / 1_000_000)
-                .saturating_sub(1)
-                .min(u32::MAX as u64) as u32;
+            let ticks = super::us_to_ldval(us, self.bus_clk);
             let pit = regs();
             let ch = CH as usize;
             // Stop → load → clear flag → enable with interrupt
