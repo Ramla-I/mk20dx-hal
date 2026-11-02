@@ -315,9 +315,19 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] `poll()` from the USB0 interrupt; SOF opt-in (`enable_sof_interrupt`, `take_sof`, `frame_number`)
 - [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only),
   `tests/usb_bufs.rs` (5 tests, packet buffers and ENDPTn per direction; run with and without the
-  testsuite feature `usb-endpoints-4`; written 2026-11-02, not yet run on the device) and
+  testsuite feature `usb-endpoints-4`) and
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
+
+### 2026-11-02 — RAM and flash: no 64-bit divide, USB buffers per direction (Unreleased)
+
+Branch `size-reductions`. Run on the FLXS1 board (MK20DX256, J-Link), all
+passed: `delay` 6/6 (zero delay 35 ticks, budget 100), `timer` 10/10,
+`lptmr` 8/8, `uart` 4/4, `spi_baud` 5/5, `usb` 6/6, `usb_bufs` 5/5 with 16
+endpoints and 5/5 with `usb-endpoints-4`, `usb_irq` 4/4 with the host in
+both layouts (4 Note On received; ENDPT1 = 0x19 OUT only, ENDPT2 = 0x15 IN
+only, the usb_dev.c values). With `usb-endpoints-4`, EP0 and EP1 OUT receive
+into the BDT-tail buffers. Sizes: see CHANGELOG (Unreleased).
 
 ### 2026-11-02 — 0.3.0 released (SPI, DMA, USB fixes found on flxs1)
 
