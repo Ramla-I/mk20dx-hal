@@ -511,8 +511,8 @@ macro_rules! adc_scan_impl {
             ///
             /// For 1-2 channels, PDB pre-trigger 0 triggers SC1A and
             /// pre-trigger 1 (back-to-back) triggers SC1B. The ADC asks for
-            /// DMA when any SC1n[COCO] sets (K20 RM ch31, SC2[DMAEN]); the DMA
-            /// reads RA, then RB (4 bytes on), then goes back to RA for the
+            /// DMA when any `SC1n[COCO]` sets (K20 RM ch31, `SC2[DMAEN]`); the
+            /// DMA reads RA, then RB (4 bytes on), then goes back to RA for the
             /// next scan. Reading a result register clears its COCO.
             ///
             /// Before 0.3.2 the DMA read RA for both slots, so `results[1]`
