@@ -297,8 +297,8 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
 - [x] `UsbBus` struct implementing `usb_device::bus::UsbBus` trait (v0.3)
 - [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(&sim, &clocks)` → `UsbBus`
-- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong
-- [x] Static endpoint buffer pool — 64 × 64-byte buffers, 4-byte aligned
+- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong; with 4 endpoints the 384 B after the table hold 6 packet buffers (Unreleased)
+- [x] Packet buffers — two per allocated endpoint direction (EP0 four), from the BDT tail, then the HAL pool (`usb_bus()`) or the application's (`UsbBus::with_buffers`, Unreleased)
 - [x] USB 48 MHz clock configuration (SIM SOPT2/CLKDIV2/SCGC4)
   - USBFRAC/USBDIV derived from `Clocks`: 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - [x] Endpoint allocation with type/direction tracking
@@ -313,7 +313,9 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] ISTAT/ERRSTAT w1c correct handling (write() not modify())
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
 - [x] `poll()` from the USB0 interrupt; SOF opt-in (`enable_sof_interrupt`, `take_sof`, `frame_number`)
-- [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only) and
+- [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only),
+  `tests/usb_bufs.rs` (5 tests, packet buffers and ENDPTn per direction; run with and without the
+  testsuite feature `usb-endpoints-4`; written 2026-11-02, not yet run on the device) and
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
 

@@ -112,7 +112,7 @@ fn main() -> ! {
 | ADC | `adc` | *(HAL-specific)* | Calibration, averaging, DMA, PDB-triggered multi-channel scan (3+ channels; the 1-2 channel `start_continuous_scan` has a known issue, see CHANGELOG) |
 | PIT | `timer` | *(HAL-specific)* | 4-channel periodic interrupt timer |
 | DMA | `dma` | *(HAL-specific)* | eDMA + DMAMUX, channel linking, scatter-gather, waits with a DWT-cycle timeout |
-| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)`. 16 endpoints (4 with `usb-endpoints-4`) |
+| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)`. 16 endpoints (4 with `usb-endpoints-4`); `UsbBus::with_buffers` takes only the packet buffers the endpoints need |
 | DAC | `dac` | *(HAL-specific)* | 12-bit, mk20d7 only |
 | Flash | `flash` | `NorFlash`, `ReadNorFlash` | FTFL, 2 KB sectors |
 | EEPROM | `eeprom` | *(HAL-specific)* | FlexMemory emulated EEPROM |
@@ -137,7 +137,7 @@ fn main() -> ! {
 | `defmt` | `defmt::Format` derives on error and status types |
 | `async` | Async support via `embassy-sync` + `embedded-hal-async` |
 | `critical-section` | Forward `critical-section` feature to the PAC |
-| `usb-endpoints-4` | USB endpoints 0-3 only: 1 KB of buffers in place of 4 KB |
+| `usb-endpoints-4` | USB endpoints 0-3 only: 1,152 B of USB RAM in place of 4,608 B (640 B with `UsbBus::with_buffers` for EP0 + EP1 OUT/IN) |
 
 Features `mk20d5` and `mk20d7` are **mutually exclusive** — selecting both
 is a compile error.

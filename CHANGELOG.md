@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `UsbBus::with_buffers(usb0, &sim, &clocks, buffers)` and `UsbBuffer`: the
+  USB packet buffers come from the application, as many as its endpoints
+  need, in place of the HAL's pool for every endpoint in both directions.
+  `UsbBus::TAIL_BUFFERS` says how many the BDT block already holds. A MIDI
+  device (EP0, EP1 OUT/IN) with `usb-endpoints-4` needs 2: 640 B of USB
+  RAM in all, in place of 1,536 B. Measured on flxs1: static RAM -868 B,
+  flash +36 B.
+
+### Changed
+
+- USB packet buffers go only to the endpoint directions that a class
+  allocates (two each, EP0 four), and ENDPTn enables only those directions
+  (as usb_dev.c does with `ENDPOINT_TRANSMIT_ONLY` / `RECEIVE_ONLY`). Before,
+  each endpoint number had four buffers and both directions on.
+- With `usb-endpoints-4`, the 384 B after the 128-byte BDT, which the
+  512-byte alignment of the table left unused, hold 6 packet buffers: USB
+  RAM 1,152 B in place of 1,536 B (flxs1 static RAM -364 B with no code
+  change). The static keeps the name `BDT`, so a linker script that places
+  it by symbol still finds it.
+- No 64-bit divide in the HAL: `Delay::delay_ns`, the SPI and UART baud
+  calculations and the PIT and LPTMR periods use 32-bit math with the same
+  results. A firmware with no other 64-bit divide no longer links
+  `__aeabi_uldivmod` (about 930 B): testsuite `delay` -968 B, `spi_baud`
+  -1,036 B, `timer` -864 B, `lptmr` -964 B.
+
 ## [0.3.0] - 2026-11-02
 
 0.3.0, not 0.2.3: `DmaError` has a new variant (see Added), which breaks an
