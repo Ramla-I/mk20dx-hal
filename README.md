@@ -106,7 +106,7 @@ fn main() -> ! {
 |------------|--------|--------------------|-------|
 | GPIO | `gpio` | `InputPin`, `OutputPin`, `StatefulOutputPin` | Type-state pin modes, 5 ports (A-E) |
 | UART | `uart` | `serial::Read`, `serial::Write`, `embedded-io` | UART0-2, FIFO, DMA |
-| SPI | `spi` | `SpiBus` | DSPI, baud rate calc, DMA (PUSHR) |
+| SPI | `spi` | `SpiBus` | DSPI, baud rate calc, a different SCK rate per transaction (`set_baud`), DMA (PUSHR) |
 | I2C | `i2c` | `I2c` | 7-bit addressing, I2C0 (+I2C1 on mk20d7) |
 | PWM | `pwm` | `SetDutyCycle` | FTM0-2, combined mode, dead-time, input capture, output compare, quadrature decoder |
 | ADC | `adc` | *(HAL-specific)* | Calibration, averaging, DMA, PDB-triggered multi-channel scan (3+ channels; the 1-2 channel `start_continuous_scan` has a known issue, see CHANGELOG) |

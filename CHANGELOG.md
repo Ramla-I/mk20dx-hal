@@ -5,37 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- `spi::Baud`: the CTAR0 baud fields (BR, PBR, DBR) for one SCK rate,
-  from `calc_baud` (`Baud::new(&clocks, hz)`, `Baud::from_bus_clk`,
-  `Baud::rate`).
-- `Spi::baud` and `Spi::set_baud`: read, or change, the SCK rate of CTAR0
-  between transactions, for devices on one bus that need different rates.
-  `set_baud` halts the module to the Stopped state for the write (K20 RM
-  45.4.1) and runs it again; the same rate again is one register read.
-- `spi::frame_bus_cycles`: the bus cycles of one frame for given CTAR
-  fields (bits, SCK period, the three delays).
-
-### Fixed
-
-- USB: an OUT endpoint stopped receiving for good when both RX banks
-  completed before the class read one (a class that holds off its reads
-  for flow control, or two packets in one interrupt). `poll()` kept only
-  the last bank, so `read()` re-armed it and left the other bank owned
-  by the CPU; the controller then NAKed every later packet. `poll()` now
-  keeps the second bank behind the first, and `read()` hands it out next.
-- `Spi::wait_tx_complete` ran to its bound when the last frame had
-  already ended before its TCF clear, which at 15-30 MHz is common (an
-  RX DMA that took every byte always ends that way). The fixed bound of
-  2000 SR reads, sized for 1 MHz, cost about 440 us each time (FLXS1:
-  every flash chunk read and most display lines). The bound is now two
-  frames at CTAR0's timing, in SR reads (each takes at least one bus
-  cycle).
-
-## [0.3.0] - 2026-10-18
+## [0.3.0] - 2026-11-02
 
 0.3.0, not 0.2.3: `DmaError` has a new variant (see Added), which breaks an
 exhaustive `match` on it.
@@ -49,8 +19,11 @@ exhaustive `match` on it.
   transfer read it: every SPI read after a DMA transfer was one byte late.
   The call overhead between crates mostly hid the race; with LTO it hit on
   every transfer (FLXS1: button reads shifted, flash reads wrong). It now
-  clears TCF once the TX FIFO is empty and waits for the last frame's TCF,
-  bounded for a frame that ended before the clear.
+  clears TCF once the TX FIFO is empty and waits for the last frame's TCF.
+  The wait is bounded, for a frame that ended before the clear, which at
+  15-30 MHz is common (an RX DMA that took every byte always ends that
+  way): two frames at CTAR0's timing, in SR reads (each takes at least one
+  bus cycle).
 - The blocking `transfer_byte` (`SpiBus` and the byte helpers) and the
   async one drop a byte left in the RX FIFO before the push (MCR
   `CLR_RXF`); the async one also waits for RFDF before it reads POPR (TCF
@@ -65,6 +38,12 @@ exhaustive `match` on it.
   so it never completed. Two drivers that share a source must each call
   `set_source` before each transfer and must not run at the same time.
   The scan reads CHCFG as 4 words, about 0.3 us at 120 MHz.
+- USB: an OUT endpoint stopped receiving for good when both RX banks
+  completed before the class read one (a class that holds off its reads
+  for flow control, or two packets in one interrupt). `poll()` kept only
+  the last bank, so `read()` re-armed it and left the other bank owned
+  by the CPU; the controller then NAKed every later packet. `poll()` now
+  keeps the second bank behind the first, and `read()` hands it out next.
 
 ### Added
 
@@ -82,6 +61,15 @@ exhaustive `match` on it.
   flash reads.
 - `DmaError::Timeout`. `DmaError` is not `#[non_exhaustive]`, so an
   exhaustive `match` on it outside the crate needs the new arm.
+- `spi::Baud`: the CTAR0 baud fields (BR, PBR, DBR) for one SCK rate,
+  from `calc_baud` (`Baud::new(&clocks, hz)`, `Baud::from_bus_clk`,
+  `Baud::rate`).
+- `Spi::baud` and `Spi::set_baud`: read, or change, the SCK rate of CTAR0
+  between transactions, for devices on one bus that need different rates.
+  `set_baud` halts the module to the Stopped state for the write (K20 RM
+  45.4.1) and runs it again; the same rate again is one register read.
+- `spi::frame_bus_cycles`: the bus cycles of one frame for given CTAR
+  fields (bits, SCK period, the three delays).
 
 ## [0.2.2] - 2026-10-15
 
@@ -241,6 +229,7 @@ the undocumented `USBTRC0 = 0x40` bit, before `CTL` is enabled.
 
 - Initial release.
 
+[0.3.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.3.0
 [0.2.2]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.0
