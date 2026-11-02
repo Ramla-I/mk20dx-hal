@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `Adc::start_continuous_scan` (1-2 channels) works. Its DMA read RA for
+  both slots, so `results[1]` held channel 0 and RB stayed unread, and
+  `auto_disable` stopped the DMA after the first scan, so the results never
+  changed. The DMA now reads RA, then RB (`source_offset` 4), goes back to RA
+  after each scan, and keeps its request on. A 1-channel scan also turns
+  PDB pre-trigger 1 off again, which a 2-channel scan before it left on.
+
 ## [0.3.1] - 2026-11-02
 
 ### Added

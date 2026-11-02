@@ -242,7 +242,7 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
 - [x] Macro-generated implementation for each ADC instance
 - [x] ADC1 feature-gated behind `mk20d7`
 - [x] SC3 w1c hazard avoided (write() instead of modify())
-- [ ] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — **broken, see 2026-10-15**
+- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — broken up to 0.3.1, fixed (Unreleased, see 2026-11-02)
   - [x] `ScanConfig` struct (channels, modulus, prescaler, multiplier)
   - [x] `ContinuousScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] PDB pre-trigger 0 + back-to-back pre-trigger 1 for 2-channel mode
@@ -254,8 +254,9 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
   - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
   - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
-  and `tests/adc_scan.rs` (7 tests: multi-channel slot map for 3/4/5 channels, PDB rate,
-  averaging kept, restart after a sequence error)
+  and `tests/adc_scan.rs` (11 tests: multi-channel slot map for 3/4/5 channels, PDB rate,
+  averaging kept, restart after a sequence error; continuous scan with 1 and 2 channels,
+  and a multi-channel scan after a continuous one)
 
 Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
@@ -388,6 +389,17 @@ RB = 1: the DMA reads RA for both slots. `auto_disable: true` also clears
 ERQ after the first scan, so the results never update. A multi-channel scan
 started after it on the same ADC did not run (cause not proved; the unread
 RB is the probable one). Nothing in flxs1 uses it.
+
+Fixed 2026-11-02 (Unreleased): the DMA reads RA, then RB (`source_offset`
+4, `source_last_adjust` -4 x channels) and keeps its request on
+(`auto_disable: false`). A 1-channel scan also turns PDB pre-trigger 1 off,
+which a 2-channel scan before it left on (the multi-channel scan already
+did). On the FLXS1 board, `tests/adc_scan.rs` 11/11: [VREFSH, VREFSL] gives
+[1023, 1], [VREFSL, VREFSH] gives [1, 1023], every slot rewritten in each of
+500 checks over 100 ms, 1 channel after 2, and a 4-channel multi scan after
+a continuous scan. The same tests on the old code failed at once: "scan
+stopped: not rewritten [500, 500]". The multi-channel stall was not seen
+again; RB is now read each scan.
 
 ### 2026-10-14 — interrupt-driven poll, SOF tick, RX toggle fix
 
