@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-11-02 (0.3.1: no 64-bit divide; USB packet buffers per allocated direction, 6 in the BDT tail, `UsbBus::with_buffers`. 0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
+**Last updated:** 2026-11-05 (0.3.2: `start_continuous_scan` reads RA then RB and keeps running. 0.3.1: no 64-bit divide; USB packet buffers per allocated direction, 6 in the BDT tail, `UsbBus::with_buffers`. 0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -242,11 +242,11 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
 - [x] Macro-generated implementation for each ADC instance
 - [x] ADC1 feature-gated behind `mk20d7`
 - [x] SC3 w1c hazard avoided (write() instead of modify())
-- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — broken up to 0.3.1, fixed (Unreleased, see 2026-11-02)
+- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — broken up to 0.3.1, fixed in 0.3.2 (see 2026-11-02)
   - [x] `ScanConfig` struct (channels, modulus, prescaler, multiplier)
   - [x] `ContinuousScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] PDB pre-trigger 0 + back-to-back pre-trigger 1 for 2-channel mode
-  - [x] DMA reads ADC RA into results buffer, auto-wraps via `dest_last_adjust`
+  - [x] DMA reads RA, then RB, into the results buffer and keeps its request on; `source_last_adjust` and `dest_last_adjust` wrap it (0.3.2)
 - [x] Multi-channel scanning (3+ channels via `start_multi_channel_scan()`)
   - [x] `MultiChannelScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] DMA channel linking: DMA-A reads results, links to DMA-B on the minor and the major loop (0.2.2)
@@ -320,6 +320,14 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
 
+### 2026-11-05 — 0.3.2 released (ADC continuous scan)
+
+One fix: `start_continuous_scan` (1-2 channels) reads RA, then RB, and keeps
+running. No API change. Proof: `mk20dx-testsuite/tests/adc_scan.rs` 11/11 on
+the FLXS1 board; the old code failed the new tests. See 2026-10-15 ("Fixed
+2026-11-02") for the details. flxs1 does not use this function (it scans 4
+channels with `start_multi_channel_scan`), so 0.3.2 changes nothing there.
+
 ### 2026-11-02 — RAM and flash: no 64-bit divide, USB buffers per direction (0.3.1)
 
 Run on the FLXS1 board (MK20DX256, J-Link), all
@@ -390,7 +398,7 @@ ERQ after the first scan, so the results never update. A multi-channel scan
 started after it on the same ADC did not run (cause not proved; the unread
 RB is the probable one). Nothing in flxs1 uses it.
 
-Fixed 2026-11-02 (Unreleased): the DMA reads RA, then RB (`source_offset`
+Fixed 2026-11-02, released in 0.3.2 (2026-11-05): the DMA reads RA, then RB (`source_offset`
 4, `source_last_adjust` -4 x channels) and keeps its request on
 (`auto_disable: false`). A 1-channel scan also turns PDB pre-trigger 1 off,
 which a 2-channel scan before it left on (the multi-channel scan already
