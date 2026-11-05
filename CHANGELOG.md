@@ -17,6 +17,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   putting CH2/CH3 (or CH0/CH1) in input capture through `FtmExt::split()`.
   `set_filter` now clears QUADEN and the edge bits of any input-capture
   channel on CH0..CH3 for the write, then restores them.
+  
+## [0.3.2] - 2026-11-05
+
+### Fixed
+
+- `Adc::start_continuous_scan` (1-2 channels) works. Its DMA read RA for
+  both slots, so `results[1]` held channel 0 and RB stayed unread, and
+  `auto_disable` stopped the DMA after the first scan, so the results never
+  changed. The DMA now reads RA, then RB (`source_offset` 4), goes back to RA
+  after each scan, and keeps its request on. A 1-channel scan also turns
+  PDB pre-trigger 1 off again, which a 2-channel scan before it left on.
+
+## [0.3.1] - 2026-11-02
+
+### Added
+
+- `UsbBus::with_buffers(usb0, &sim, &clocks, buffers)` and `UsbBuffer`: the
+  USB packet buffers come from the application, as many as its endpoints
+  need, in place of the HAL's pool for every endpoint in both directions.
+  `UsbBus::TAIL_BUFFERS` says how many the BDT block already holds. A MIDI
+  device (EP0, EP1 OUT/IN) with `usb-endpoints-4` needs 2: 640 B of USB
+  RAM in all, in place of 1,536 B. Measured on flxs1: static RAM -868 B,
+  flash +36 B.
+
+### Changed
+
+- USB packet buffers go only to the endpoint directions that a class
+  allocates (two each, EP0 four), and ENDPTn enables only those directions
+  (as usb_dev.c does with `ENDPOINT_TRANSMIT_ONLY` / `RECEIVE_ONLY`). Before,
+  each endpoint number had four buffers and both directions on.
+- With `usb-endpoints-4`, the 384 B after the 128-byte BDT, which the
+  512-byte alignment of the table left unused, hold 6 packet buffers: USB
+  RAM 1,152 B in place of 1,536 B (flxs1 static RAM -364 B with no code
+  change). The static keeps the name `BDT`, so a linker script that places
+  it by symbol still finds it.
+- No 64-bit divide in the HAL: `Delay::delay_ns`, the SPI and UART baud
+  calculations and the PIT and LPTMR periods use 32-bit math with the same
+  results. A firmware with no other 64-bit divide no longer links
+  `__aeabi_uldivmod` (about 930 B): testsuite `delay` -968 B, `spi_baud`
+  -1,036 B, `timer` -864 B, `lptmr` -964 B.
+
+## [0.3.0] - 2026-11-02
+
+0.3.0, not 0.2.3: `DmaError` has a new variant (see Added), which breaks an
+exhaustive `match` on it.
+
+### Fixed
+
+- `Spi::wait_tx_complete` returned while the last frame still shifted.
+  TCF is set by every frame, and the one an earlier frame left set ended
+  the wait at once. The callers then flushed the FIFOs, the last frame's
+  RX byte landed in the RX FIFO after the flush, and the next byte
+  transfer read it: every SPI read after a DMA transfer was one byte late.
+  The call overhead between crates mostly hid the race; with LTO it hit on
+  every transfer (FLXS1: button reads shifted, flash reads wrong). It now
+  clears TCF once the TX FIFO is empty and waits for the last frame's TCF.
+  The wait is bounded, for a frame that ended before the clear, which at
+  15-30 MHz is common (an RX DMA that took every byte always ends that
+  way): two frames at CTAR0's timing, in SR reads (each takes at least one
+  bus cycle).
+- The blocking `transfer_byte` (`SpiBus` and the byte helpers) and the
+  async one drop a byte left in the RX FIFO before the push (MCR
+  `CLR_RXF`); the async one also waits for RFDF before it reads POPR (TCF
+  can come first).
+
+- `DmaChannel::set_source` now clears the same source from every other
+  DMAMUX channel first (CHCFG = 0). The K20 reference manual says two
+  CHCFG registers with the same SOURCE give unpredictable behaviour, even
+  when one has ENBL clear, and nothing cleared a source after a transfer.
+  Found on the FLXS1: SPI0_TX was on for the display (1), DAC (2) and
+  flash TX (6) channels, and the flash read on channels 6/7 lost RX bytes,
+  so it never completed. Two drivers that share a source must each call
+  `set_source` before each transfer and must not run at the same time.
+  The scan reads CHCFG as 4 words, about 0.3 us at 120 MHz.
+- USB: an OUT endpoint stopped receiving for good when both RX banks
+  completed before the class read one (a class that holds off its reads
+  for flow control, or two packets in one interrupt). `poll()` kept only
+  the last bank, so `read()` re-armed it and left the other bank owned
+  by the CPU; the controller then NAKed every later packet. `poll()` now
+  keeps the second bank behind the first, and `read()` hands it out next.
+
+### Added
+
+- Feature `usb-endpoints-4`: the USB bus has endpoints 0-3 in place of
+  0-15, and its buffer pool is 1 KB in place of 4 KB (four 64-byte buffers
+  per endpoint). Enough for EP0 and three more endpoint numbers, for
+  example a USB-MIDI device (EP0, one bulk OUT, one bulk IN). Default
+  unchanged.
+- `DmaReadTransfer::wait_timeout(max_cycles)` and
+  `DmaTransfer::wait_timeout(max_cycles)`: the same checks as `wait()`,
+  then a limit in DWT cycles. On the limit they return
+  `Err(DmaError::Timeout)` and the Drop impl stops the channels. `wait()`
+  loops with no limit, so an RX channel that misses one byte never returns.
+  The caller must have the DWT cycle counter running. Added for the FLXS1
+  flash reads.
+- `DmaError::Timeout`. `DmaError` is not `#[non_exhaustive]`, so an
+  exhaustive `match` on it outside the crate needs the new arm.
+- `spi::Baud`: the CTAR0 baud fields (BR, PBR, DBR) for one SCK rate,
+  from `calc_baud` (`Baud::new(&clocks, hz)`, `Baud::from_bus_clk`,
+  `Baud::rate`).
+- `Spi::baud` and `Spi::set_baud`: read, or change, the SCK rate of CTAR0
+  between transactions, for devices on one bus that need different rates.
+  `set_baud` halts the module to the Stopped state for the write (K20 RM
+  45.4.1) and runs it again; the same rate again is one register read.
+- `spi::frame_bus_cycles`: the bus cycles of one frame for given CTAR
+  fields (bits, SCK period, the three delays).
 
 ## [0.2.2] - 2026-10-15
 
@@ -176,6 +282,9 @@ the undocumented `USBTRC0 = 0x40` bit, before `CTL` is enabled.
 
 - Initial release.
 
+[0.3.2]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.3.2
+[0.3.1]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.3.1
+[0.3.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.3.0
 [0.2.2]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.0

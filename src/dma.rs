@@ -47,6 +47,29 @@ fn dmamux_regs() -> &'static pac::dmamux::RegisterBlock {
     unsafe { &*pac::Dmamux::PTR }
 }
 
+/// Clear `source` from every DMAMUX channel except `keep` (CHCFG = 0).
+///
+/// The K20 reference manual (DMAMUX chapter): two CHCFG registers with the
+/// same SOURCE give unpredictable behaviour, even when one has ENBL clear.
+/// Seen on the FLXS1: SPI0_TX left on the display (1) and DAC (2) channels
+/// made a SPI0 read on channels 6/7 lose RX bytes, so it never completed.
+/// The 16 byte-wide CHCFG registers are read as 4 words (a word read gives
+/// the same bytes in order, checked on an MK20DX256); only a channel that
+/// matches is written, one byte.
+fn clear_source_elsewhere(source: u8, keep: usize) {
+    let base = pac::Dmamux::PTR as *const u32;
+    for word in 0..NUM_CHANNELS.div_ceil(4) {
+        // SAFETY: word < NUM_CHANNELS / 4 stays inside the CHCFG array.
+        let v = unsafe { core::ptr::read_volatile(base.add(word)) };
+        for byte in 0..4 {
+            let ch = word * 4 + byte;
+            if ch < NUM_CHANNELS && ch != keep && ((v >> (8 * byte)) as u8 & 0x3F) == source {
+                dmamux_regs().chcfg(ch).write(|w| w);
+            }
+        }
+    }
+}
+
 /// Map channel number to DCHPRI array index.
 ///
 /// DCHPRI registers are byte-swapped within 32-bit groups:
@@ -369,6 +392,9 @@ pub enum DmaError {
     DestBusError,
     /// Transfer was cancelled.
     Cancelled,
+    /// A bounded wait (`wait_timeout`) passed its cycle limit before the
+    /// transfer completed or a channel reported an error.
+    Timeout,
 }
 
 // ----- DMA Channel -----
@@ -385,12 +411,21 @@ impl<const CH: u8> DmaChannel<CH> {
 
     /// Set the DMAMUX request source for this channel.
     ///
-    /// Disables the channel in the DMAMUX, writes the new source, then
-    /// re-enables it. The hardware requires the channel to be disabled
-    /// before changing the source.
+    /// First clears the same source from every other channel: one source
+    /// may be routed to one channel only (K20 RM, DMAMUX: two CHCFG with the
+    /// same SOURCE are unpredictable, even with ENBL clear). Two drivers
+    /// that share a source (for example SPI0_TX for a display and a DAC)
+    /// must each call `set_source` before each of their transfers, and the
+    /// caller must not let them run at the same time (the FLXS1 holds the
+    /// SPI bus lock). Then disables this channel in the DMAMUX, writes the
+    /// new source and re-enables it; the hardware requires the channel to
+    /// be disabled before changing the source. About 0.3 us at 120 MHz.
     pub fn set_source(&mut self, source: DmaSource) {
         let dmamux = dmamux_regs();
         let ch = CH as usize;
+        if source.0 & 0x3F != 0 {
+            clear_source_elsewhere(source.0 & 0x3F, ch);
+        }
         // Disable channel before changing source
         dmamux.chcfg(ch).write(|w| w);
         // Write source and enable
@@ -402,6 +437,8 @@ impl<const CH: u8> DmaChannel<CH> {
     }
 
     /// Disable the DMAMUX source for this channel (stops hardware requests).
+    ///
+    /// Writes CHCFG = 0, so the source is free for another channel.
     pub fn disable_source(&mut self) {
         dmamux_regs().chcfg(CH as usize).write(|w| w);
     }
@@ -909,6 +946,48 @@ impl<'a, const CH: u8> DmaTransfer<'a, CH> {
             }
         }
     }
+
+    /// Block until the transfer completes, errors, or `max_cycles` DWT
+    /// cycles pass.
+    ///
+    /// The checks run in the same order as [`wait()`](DmaTransfer::wait)
+    /// (error, then complete), then the timeout check. On completion or
+    /// error, the result is the same as `wait()`. On a timeout, returns
+    /// `Err(DmaError::Timeout)`; the Drop impl then disables the channel
+    /// request and clears its DONE and error flags.
+    ///
+    /// The elapsed time comes from `DWT::cycle_count()` with
+    /// `wrapping_sub`, so one counter wrap during the wait is safe.
+    /// The caller must have the DWT cycle counter running
+    /// (`DCB::enable_trace()` and `DWT::enable_cycle_counter()`); this
+    /// function does not enable it. If the counter is stopped, the wait
+    /// never times out.
+    pub fn wait_timeout(self, max_cycles: u32) -> Result<&'a mut DmaChannel<CH>, DmaError> {
+        let start = cortex_m::peripheral::DWT::cycle_count();
+        loop {
+            if self.channel.has_error() {
+                let err = self.channel.error_status().unwrap_or(DmaError::Cancelled);
+                self.channel.clear_error();
+                self.channel.clear_done();
+                self.channel.disable_request();
+                core::mem::forget(self);
+                return Err(err);
+            }
+            if self.channel.is_complete() {
+                self.channel.clear_done();
+                self.channel.disable_request();
+                // SAFETY: as in `wait()`: the raw pointer keeps the 'a
+                // lifetime of self.channel, and forget() stops the Drop impl.
+                let ch_ptr = self.channel as *const DmaChannel<CH> as *mut DmaChannel<CH>;
+                core::mem::forget(self);
+                return Ok(unsafe { &mut *ch_ptr });
+            }
+            if cortex_m::peripheral::DWT::cycle_count().wrapping_sub(start) >= max_cycles {
+                // Dropping self aborts the transfer.
+                return Err(DmaError::Timeout);
+            }
+        }
+    }
 }
 
 impl<'a, const CH: u8> Drop for DmaTransfer<'a, CH> {
@@ -952,6 +1031,44 @@ impl<const TX_CH: u8, const RX_CH: u8> DmaReadTransfer<'_, TX_CH, RX_CH> {
             }
             if self.rx_channel.is_complete() {
                 return Ok(());
+            }
+        }
+    }
+
+    /// Block until the read completes, a channel errors, or `max_cycles` DWT
+    /// cycles pass.
+    ///
+    /// The checks run in the same order as
+    /// [`wait()`](DmaReadTransfer::wait) (RX error, TX error, RX complete),
+    /// then the timeout check. On a timeout, returns
+    /// `Err(DmaError::Timeout)`; the Drop impl then disables both channel
+    /// requests and clears their DONE and error flags.
+    ///
+    /// The elapsed time comes from `DWT::cycle_count()` with
+    /// `wrapping_sub`, so one counter wrap during the wait is safe.
+    /// The caller must have the DWT cycle counter running
+    /// (`DCB::enable_trace()` and `DWT::enable_cycle_counter()`); this
+    /// function does not enable it. If the counter is stopped, the wait
+    /// never times out.
+    ///
+    /// This function does not touch the SPI peripheral. After any result,
+    /// and most of all after a timeout (the FIFOs can hold stale words),
+    /// call `Spi::disable_dma_requests()` and `Spi::flush_fifos()`, as
+    /// after `wait()`.
+    pub fn wait_timeout(self, max_cycles: u32) -> Result<(), DmaError> {
+        let start = cortex_m::peripheral::DWT::cycle_count();
+        loop {
+            if self.rx_channel.has_error() {
+                return Err(self.rx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.tx_channel.has_error() {
+                return Err(self.tx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.rx_channel.is_complete() {
+                return Ok(());
+            }
+            if cortex_m::peripheral::DWT::cycle_count().wrapping_sub(start) >= max_cycles {
+                return Err(DmaError::Timeout);
             }
         }
     }
@@ -1234,7 +1351,7 @@ mod async_impl {
         /// and started before calling this.
         ///
         /// The caller must wire the corresponding `DMA_CH{N}` interrupt to
-        /// [`on_dmaN_interrupt()`] and unmask it in the NVIC.
+        /// `on_dmaN_interrupt()` (for example [`on_dma0_interrupt()`]) and unmask it in the NVIC.
         pub async fn wait_complete(&mut self) -> Result<(), DmaError> {
             self.enable_interrupt();
             let result = core::future::poll_fn(|cx| {

@@ -507,17 +507,17 @@ macro_rules! adc_scan_impl {
             /// PDB pre-triggers for each channel, and uses DMA to read results
             /// into the provided buffer.
             ///
-            /// **Known issue (0.2.2): this function does not work.** The DMA
-            /// reads RA for both slots, so `results[1]` holds channel 0, and
-            /// `auto_disable` stops the DMA after the first scan. Use
-            /// [`start_multi_channel_scan`](Self::start_multi_channel_scan)
-            /// with 3 or more entries (a channel can repeat).
-            ///
             /// # 2-channel path
             ///
             /// For 1-2 channels, PDB pre-trigger 0 triggers SC1A and
-            /// pre-trigger 1 (back-to-back) triggers SC1B. Each conversion
-            /// result is DMA'd from the result register to the buffer.
+            /// pre-trigger 1 (back-to-back) triggers SC1B. The ADC asks for
+            /// DMA when any `SC1n[COCO]` sets (K20 RM ch31, `SC2[DMAEN]`); the
+            /// DMA reads RA, then RB (4 bytes on), then goes back to RA for the
+            /// next scan. Reading a result register clears its COCO.
+            ///
+            /// Before 0.3.2 the DMA read RA for both slots, so `results[1]`
+            /// held channel 0 and RB stayed unread, and `auto_disable`
+            /// stopped the DMA after the first scan.
             ///
             /// # Arguments
             ///
@@ -586,6 +586,12 @@ macro_rules! adc_scan_impl {
                     // triggers SC1B → channel[1]
                     pdb.enable_pretrigger($pdb_channel, 1);
                     pdb.enable_back_to_back($pdb_channel, 1);
+                } else {
+                    // A 2-channel scan before this one left pre-trigger 1
+                    // on: it would convert SC1B into RB, which this scan
+                    // never reads, and that COCO would keep the DMA request up.
+                    pdb.disable_pretrigger($pdb_channel, 1);
+                    pdb.disable_back_to_back($pdb_channel, 1);
                 }
 
                 // LDOK moves MOD and CHnDLY0 across only while PDBEN is set
@@ -594,7 +600,9 @@ macro_rules! adc_scan_impl {
                 pdb.enable();
                 pdb.load_ok();
 
-                // 4. Configure DMA: peripheral read from ADC RA → results buffer
+                // 4. Configure DMA: RA (then RB) → results buffer. RA and RB
+                // are 32-bit registers 4 bytes apart (0x10, 0x14); the 16-bit
+                // read takes the low half, which holds the result.
                 let total_bytes = num_ch as i32 * 2; // 16-bit per result
                 unsafe {
                     dma_ch.configure(&crate::dma::TransferConfig {
@@ -602,14 +610,15 @@ macro_rules! adc_scan_impl {
                         dest_addr: results.as_mut_ptr() as u32,
                         source_size: crate::dma::TransferSize::Bits16,
                         dest_size: crate::dma::TransferSize::Bits16,
-                        source_offset: 0,     // Fixed peripheral address
+                        source_offset: 4,     // RA, then RB
                         dest_offset: 2,       // Advance 2 bytes per result
                         minor_loop_bytes: 2,  // 1 result per DMA activation
                         major_loop_count: num_ch as u16,
-                        source_last_adjust: 0,
+                        source_last_adjust: -(num_ch as i32 * 4), // Back to RA
                         dest_last_adjust: -total_bytes, // Reset buffer pointer
                         dest_modulo: 0,
-                        auto_disable: true,
+                        // Keep the request on: the scan runs until stopped.
+                        auto_disable: false,
                     });
                 }
 

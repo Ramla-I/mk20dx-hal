@@ -30,8 +30,8 @@ Add the HAL to your `Cargo.toml` with the appropriate feature for your board:
 
 ```toml
 [dependencies]
-mk20dx-hal = { version = "0.2", features = ["mk20d7", "rt", "critical-section"] }
-# mk20dx-hal = { version = "0.2", features = ["mk20d5", "rt", "critical-section"] }
+mk20dx-hal = { version = "0.3", features = ["mk20d7", "rt", "critical-section"] }
+# mk20dx-hal = { version = "0.3", features = ["mk20d5", "rt", "critical-section"] }
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 ```
@@ -106,13 +106,13 @@ fn main() -> ! {
 |------------|--------|--------------------|-------|
 | GPIO | `gpio` | `InputPin`, `OutputPin`, `StatefulOutputPin` | Type-state pin modes, 5 ports (A-E) |
 | UART | `uart` | `serial::Read`, `serial::Write`, `embedded-io` | UART0-2, FIFO, DMA |
-| SPI | `spi` | `SpiBus` | DSPI, baud rate calc, DMA (PUSHR) |
+| SPI | `spi` | `SpiBus` | DSPI, baud rate calc, a different SCK rate per transaction (`set_baud`), DMA (PUSHR) |
 | I2C | `i2c` | `I2c` | 7-bit addressing, I2C0 (+I2C1 on mk20d7) |
 | PWM | `pwm` | `SetDutyCycle` | FTM0-2, combined mode, dead-time, input capture, output compare, quadrature decoder |
-| ADC | `adc` | *(HAL-specific)* | Calibration, averaging, DMA, PDB-triggered multi-channel scan (3+ channels; the 1-2 channel `start_continuous_scan` has a known issue, see CHANGELOG) |
+| ADC | `adc` | *(HAL-specific)* | Calibration, averaging, DMA, PDB-triggered scans: `start_continuous_scan` (1-2 channels, one DMA channel; fixed in 0.3.2) and `start_multi_channel_scan` (3+ channels) |
 | PIT | `timer` | *(HAL-specific)* | 4-channel periodic interrupt timer |
-| DMA | `dma` | *(HAL-specific)* | eDMA + DMAMUX, channel linking, scatter-gather |
-| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)` |
+| DMA | `dma` | *(HAL-specific)* | eDMA + DMAMUX, channel linking, scatter-gather, waits with a DWT-cycle timeout |
+| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)`. 16 endpoints (4 with `usb-endpoints-4`); `UsbBus::with_buffers` takes only the packet buffers the endpoints need |
 | DAC | `dac` | *(HAL-specific)* | 12-bit, mk20d7 only |
 | Flash | `flash` | `NorFlash`, `ReadNorFlash` | FTFL, 2 KB sectors |
 | EEPROM | `eeprom` | *(HAL-specific)* | FlexMemory emulated EEPROM |
@@ -137,6 +137,7 @@ fn main() -> ! {
 | `defmt` | `defmt::Format` derives on error and status types |
 | `async` | Async support via `embassy-sync` + `embedded-hal-async` |
 | `critical-section` | Forward `critical-section` feature to the PAC |
+| `usb-endpoints-4` | USB endpoints 0-3 only: 1,152 B of USB RAM in place of 4,608 B (640 B with `UsbBus::with_buffers` for EP0 + EP1 OUT/IN) |
 
 Features `mk20d5` and `mk20d7` are **mutually exclusive** — selecting both
 is a compile error.

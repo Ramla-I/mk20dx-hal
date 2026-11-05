@@ -1,8 +1,23 @@
 //! USB device driver for the Kinetis USB-FS controller.
 //!
 //! Implements the [`usb_device::bus::UsbBus`] trait using the hardware BDT
-//! (Buffer Descriptor Table) with ping-pong buffering. Supports 16 endpoints,
-//! each bidirectional with EVEN/ODD banks.
+//! (Buffer Descriptor Table) with ping-pong buffering. Supports 16 endpoints
+//! (4 with the `usb-endpoints-4` feature), each bidirectional with EVEN/ODD
+//! banks.
+//!
+//! # RAM
+//!
+//! Each endpoint direction that a class allocates gets two 64-byte packet
+//! buffers (EP0 gets four). The 512-byte BDT block holds the first
+//! [`UsbBus::TAIL_BUFFERS`] of them (6 with `usb-endpoints-4`, none with 16
+//! endpoints). The rest come from:
+//!
+//! - [`UsbBusExt::usb_bus`]: a HAL pool with room for every endpoint in both
+//!   directions. 4,608 B in all with 16 endpoints, 1,152 B with
+//!   `usb-endpoints-4`.
+//! - [`UsbBus::with_buffers`]: the application's buffers, as many as its
+//!   endpoints need. A MIDI device with EP0 and EP1 OUT/IN needs 8 buffers:
+//!   512 + 2 x 64 = 640 B in all with `usb-endpoints-4`.
 //!
 //! Both MK20D5 (Teensy 3.0) and MK20D7 (Teensy 3.1/3.2) have identical USB0
 //! peripherals — no `#[cfg]` gating needed.
@@ -120,8 +135,26 @@ use usb_device::{UsbDirection, UsbError};
 // Constants
 // ---------------------------------------------------------------------------
 
+/// Endpoints 0..NUM_ENDPOINTS, each with four BDT entries (32 B). The
+/// `usb-endpoints-4` feature keeps 4 (enough for a device with EP0 and up to
+/// 3 more endpoint numbers); the hardware does not touch the BDT of an
+/// endpoint that is not enabled in ENDPTn.
+#[cfg(not(feature = "usb-endpoints-4"))]
 const NUM_ENDPOINTS: usize = 16;
+#[cfg(feature = "usb-endpoints-4")]
+const NUM_ENDPOINTS: usize = 4;
 const EP_BUF_SIZE: usize = 64;
+
+/// Bytes of the BDT that the endpoints use.
+const BDT_BYTES: usize = NUM_ENDPOINTS * 4 * 8;
+/// Packet buffers in the rest of the 512-byte BDT block. The controller needs
+/// the table 512-byte aligned, so its type is 512 B whatever the endpoint
+/// count: 6 buffers fit after a 4-endpoint table, none after a 16-endpoint one.
+const TAIL_BUFS: usize = (512 - BDT_BYTES) / EP_BUF_SIZE;
+/// Buffers for every endpoint in both directions, two banks each.
+const MAX_BUFS: usize = NUM_ENDPOINTS * 4;
+/// No buffer pair given to this endpoint direction (it is not allocated).
+const NO_BUF: u8 = u8::MAX;
 
 // BDT descriptor bits (CPU → USB direction)
 const BD_OWN: u32 = 1 << 7;
@@ -179,30 +212,61 @@ struct BufferDescriptor {
     addr: u32,
 }
 
-/// Full BDT: 16 endpoints × 2 directions × 2 ping-pong = 64 entries.
-/// Must be 512-byte aligned.
+/// One USB packet buffer: 64 bytes, word aligned for the controller's DMA.
+///
+/// For [`UsbBus::with_buffers`], which takes the packet buffers from the
+/// application in place of the HAL's pool.
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct UsbBuffer([u8; EP_BUF_SIZE]);
+
+impl UsbBuffer {
+    /// A zeroed buffer.
+    pub const fn new() -> Self {
+        Self([0; EP_BUF_SIZE])
+    }
+}
+
+impl Default for UsbBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// BDT: NUM_ENDPOINTS × 2 directions × 2 ping-pong entries, then the first
+/// TAIL_BUFS packet buffers in the space up to 512 B. Must be 512-byte
+/// aligned (BDTPAGE1 holds address bits 15:9).
+///
+/// The tail is where the entries of endpoints NUM_ENDPOINTS..16 would be.
+/// Those endpoints are never enabled in ENDPTn, so the controller has no
+/// reason to read them. The K20 RM (ch. 41) does not say so in words, but
+/// Teensyduino depends on it: its table is `(NUM_ENDPOINTS + 1) * 4`
+/// entries and its linker script (mk20dx256.ld) puts `.dmabuffers`,
+/// `.usbbuffers` and `.data` right after it.
+///
+/// Keep the static named `BDT`: a firmware linker script can place it by
+/// symbol (flxs1 `bdt.x` matches `*10mk20dx_hal3usb3BDT`).
 #[repr(C, align(512))]
 struct Bdt {
     entries: [BufferDescriptor; NUM_ENDPOINTS * 4],
+    tail: [UsbBuffer; TAIL_BUFS],
 }
+
+const _: () = assert!(core::mem::size_of::<Bdt>() == 512);
 
 static mut BDT: Bdt = Bdt {
     entries: [BufferDescriptor { desc: 0, addr: 0 }; NUM_ENDPOINTS * 4],
+    tail: [UsbBuffer::new(); TAIL_BUFS],
 };
 
 // ---------------------------------------------------------------------------
 // Endpoint buffer pool
 // ---------------------------------------------------------------------------
 
-/// Static buffer pool — 64 buffers of 64 bytes each, 4-byte aligned.
-#[repr(C, align(4))]
-struct EpBufPool {
-    bufs: [[u8; EP_BUF_SIZE]; NUM_ENDPOINTS * 4],
-}
-
-static mut EP_BUFS: EpBufPool = EpBufPool {
-    bufs: [[0; EP_BUF_SIZE]; NUM_ENDPOINTS * 4],
-};
+/// The buffers after the BDT tail for [`UsbBusExt::usb_bus`]: enough for every
+/// endpoint in both directions. Only `usb_bus()` refers to it, so a firmware
+/// that uses [`UsbBus::with_buffers`] does not link it.
+static mut EP_BUFS: [UsbBuffer; MAX_BUFS - TAIL_BUFS] = [UsbBuffer::new(); MAX_BUFS - TAIL_BUFS];
 
 /// BDT index: ep * 4 + (tx ? 2 : 0) + (odd ? 1 : 0)
 const fn bdt_index(ep: usize, tx: bool, odd: bool) -> usize {
@@ -288,13 +352,22 @@ struct EndpointState {
     rx_ready: bool,
     // Which bank the completed RX data is in
     rx_complete_odd: bool,
+    // A second bank completed before the first was read (both banks hold
+    // data): its bank. read() hands it out after the first.
+    rx_queued: Option<bool>,
     // Whether this was a SETUP packet
     rx_setup: bool,
+    // The first of the two packet buffers (EVEN, then ODD) of each direction,
+    // or NO_BUF while the direction is not allocated. Given by alloc_ep().
+    rx_buf: u8,
+    tx_buf: u8,
 }
 
 impl EndpointState {
     const fn new() -> Self {
         Self {
+            rx_buf: NO_BUF,
+            tx_buf: NO_BUF,
             ep_type: None,
             max_packet_size: 0,
             stalled_in: false,
@@ -303,6 +376,7 @@ impl EndpointState {
             tx_odd: false,
             rx_ready: false,
             rx_complete_odd: false,
+            rx_queued: None,
             rx_setup: false,
         }
     }
@@ -315,6 +389,9 @@ impl EndpointState {
 struct Inner {
     endpoints: [EndpointState; NUM_ENDPOINTS],
     ep_alloc_mask: u16,
+    // The next free packet buffer: 0..TAIL_BUFS in the BDT tail, then the
+    // pool that `UsbBus::bufs` points to.
+    next_buf: u8,
 }
 
 impl Inner {
@@ -322,6 +399,7 @@ impl Inner {
         Self {
             endpoints: [EndpointState::new(); NUM_ENDPOINTS],
             ep_alloc_mask: 0,
+            next_buf: 0,
         }
     }
 }
@@ -350,6 +428,11 @@ impl Inner {
 /// call them.
 pub struct UsbBus {
     inner: UnsafeCell<Inner>,
+    /// The packet buffers after the BDT tail: [`EP_BUFS`] for `usb_bus()`,
+    /// the application's for `with_buffers()`. `'static` and used by this
+    /// bus only (the constructors consume `pac::Usb0`).
+    bufs: *mut UsbBuffer,
+    bufs_len: usize,
     /// SOFTOKEN is wanted in `INTEN`. Kept here because `enable()` resets the
     /// module, which clears `INTEN`, and must then write it back.
     sof_irq: AtomicBool,
@@ -366,12 +449,69 @@ unsafe impl Send for UsbBus {}
 unsafe impl Sync for UsbBus {}
 
 impl UsbBus {
-    fn new() -> Self {
+    /// The packet buffers that fit in the BDT block (6 with
+    /// `usb-endpoints-4`, 0 with 16 endpoints). [`with_buffers`](Self::with_buffers)
+    /// needs only the buffers past these.
+    pub const TAIL_BUFFERS: usize = TAIL_BUFS;
+
+    fn new(bufs: *mut UsbBuffer, bufs_len: usize) -> Self {
         Self {
             inner: UnsafeCell::new(Inner::new()),
+            bufs,
+            bufs_len,
             sof_irq: AtomicBool::new(false),
             sof_pending: AtomicBool::new(false),
         }
+    }
+
+    /// Like [`UsbBusExt::usb_bus`], but the packet buffers past the
+    /// [`TAIL_BUFFERS`](Self::TAIL_BUFFERS) in the BDT block come from
+    /// `buffers`, in place of the HAL's pool for every endpoint in both
+    /// directions (640 B with `usb-endpoints-4`, 4 KB without).
+    ///
+    /// Each endpoint direction that a class allocates takes two buffers
+    /// (EVEN and ODD); EP0 takes four. A device with EP0, one OUT and one IN
+    /// endpoint needs 8, so with `usb-endpoints-4` it needs 2 here. Too few
+    /// buffers make the allocation fail with `UsbError::EndpointMemoryOverflow`.
+    ///
+    /// ```ignore
+    /// use mk20dx_hal::usb::{UsbBus, UsbBuffer};
+    /// let bufs = cortex_m::singleton!(: [UsbBuffer; 2] = [UsbBuffer::new(); 2]).unwrap();
+    /// let usb_bus = UsbBus::with_buffers(dp.usb0, &dp.sim, &clocks, bufs);
+    /// ```
+    pub fn with_buffers(
+        usb0: pac::Usb0,
+        sim: &pac::Sim,
+        clocks: &Clocks,
+        buffers: &'static mut [UsbBuffer],
+    ) -> Self {
+        let _ = usb0;
+        setup_usb_clock(sim, clocks);
+        Self::new(buffers.as_mut_ptr(), buffers.len())
+    }
+
+    /// The packet buffer `n`: `0..TAIL_BUFS` in the BDT tail, then `bufs`.
+    fn buf_ptr(&self, n: usize) -> *mut u8 {
+        match n.checked_sub(TAIL_BUFS) {
+            // SAFETY: n < TAIL_BUFS, so the offset stays inside BDT.tail. A
+            // raw pointer, no reference to the static mut.
+            None => unsafe {
+                (&raw mut BDT)
+                    .cast::<u8>()
+                    .add(core::mem::offset_of!(Bdt, tail) + n * EP_BUF_SIZE)
+            },
+            // SAFETY: alloc_ep() hands out n < TAIL_BUFS + bufs_len only, so
+            // the offset stays inside the 'static slice behind `bufs`.
+            Some(k) => unsafe { self.bufs.add(k).cast() },
+        }
+    }
+
+    /// The packet buffer of one bank of one endpoint direction, or `None`
+    /// if that direction is not allocated.
+    fn ep_buf(&self, ep: usize, tx: bool, odd: bool) -> Option<*mut u8> {
+        let state = &self.inner().endpoints[ep];
+        let first = if tx { state.tx_buf } else { state.rx_buf };
+        (first != NO_BUF).then(|| self.buf_ptr(first as usize + odd as usize))
     }
 
     /// Enable or disable the start-of-frame (SOF) interrupt.
@@ -439,7 +579,11 @@ impl UsbBus {
     }
 
     /// Arm an RX buffer descriptor for the given endpoint, expecting `data1`.
+    /// Does nothing for an endpoint with no OUT direction allocated.
     fn arm_rx(&self, ep: usize, odd: bool, data1: bool) {
+        let Some(buf) = self.ep_buf(ep, false, odd) else {
+            return;
+        };
         let state = &self.inner().endpoints[ep];
         let idx = bdt_index(ep, false, odd);
         let desc = make_bd_desc(
@@ -449,10 +593,7 @@ impl UsbBus {
             true, // DTS
             false,
         );
-        // SAFETY: EP_BUFS is a static buffer pool that exists for the program's
-        // lifetime. The index is computed from a valid endpoint number.
-        let buf_addr = unsafe { EP_BUFS.bufs[idx].as_ptr() as u32 };
-        bdt_write(idx, desc, buf_addr);
+        bdt_write(idx, desc, buf as u32);
     }
 
     /// Arm both RX banks of an endpoint, as after a bus reset.
@@ -488,6 +629,7 @@ impl UsbBus {
         ep0.tx_data_toggle = false;
         ep0.tx_odd = false;
         ep0.rx_ready = false;
+        ep0.rx_queued = None;
         ep0.rx_setup = false;
         ep0.stalled_in = false;
         ep0.stalled_out = false;
@@ -530,6 +672,7 @@ impl UsbBusTrait for UsbBus {
         max_packet_size: u16,
         _interval: u8,
     ) -> usb_device::Result<EndpointAddress> {
+        let capacity = TAIL_BUFS + self.bufs_len;
         let inner = self.inner.get_mut();
 
         let ep_index = match ep_addr {
@@ -565,6 +708,21 @@ impl UsbBusTrait for UsbBus {
 
         if max_packet_size > EP_BUF_SIZE as u16 {
             return Err(UsbError::EndpointMemoryOverflow);
+        }
+
+        // Two packet buffers (EVEN, ODD) for this direction, once.
+        let next = inner.next_buf;
+        let state = &mut inner.endpoints[ep_index];
+        let slot = match ep_dir {
+            UsbDirection::Out => &mut state.rx_buf,
+            UsbDirection::In => &mut state.tx_buf,
+        };
+        if *slot == NO_BUF {
+            if next as usize + 2 > capacity {
+                return Err(UsbError::EndpointMemoryOverflow);
+            }
+            *slot = next;
+            inner.next_buf = next + 2;
         }
 
         inner.ep_alloc_mask |= 1 << ep_index;
@@ -687,6 +845,7 @@ impl UsbBusTrait for UsbBus {
             inner.endpoints[i].tx_data_toggle = false;
             inner.endpoints[i].tx_odd = false;
             inner.endpoints[i].rx_ready = false;
+            inner.endpoints[i].rx_queued = None;
             inner.endpoints[i].rx_setup = false;
             inner.endpoints[i].stalled_in = false;
             inner.endpoints[i].stalled_out = false;
@@ -712,14 +871,19 @@ impl UsbBusTrait for UsbBus {
             };
 
             let is_control = ep_type == EndpointType::Control;
+            // Enable only the directions that were allocated (they have
+            // buffers), as usb_dev.c does with ENDPOINT_TRANSMIT_ONLY /
+            // RECEIVE_ONLY.
+            let rx = ep.rx_buf != NO_BUF;
+            let tx = ep.tx_buf != NO_BUF;
 
             // Arm both RX banks — see configure_ep0() and arm_rx_both().
             self.arm_rx_both(i);
 
             usb.endpt(i).write(|w| {
                 let w = w.ephshk().set_bit()
-                          .eptxen().set_bit()
-                          .eprxen().set_bit();
+                          .eptxen().bit(tx)
+                          .eprxen().bit(rx);
                 if !is_control {
                     w.epctldis().set_bit()
                 } else {
@@ -760,9 +924,13 @@ impl UsbBusTrait for UsbBus {
             return Err(UsbError::InvalidState);
         }
 
-        let len = buf.len().min(state.max_packet_size as usize);
+        let len = buf.len().min(state.max_packet_size as usize).min(EP_BUF_SIZE);
         let odd = state.tx_odd;
         let idx = bdt_index(ep, true, odd);
+        let Some(tx_buf) = self.ep_buf(ep, true, odd) else {
+            return Err(UsbError::InvalidEndpoint);
+        };
+        let state = &mut self.inner_mut().endpoints[ep];
 
         // Check that the buffer is not owned by USB
         let bd_desc = bdt_read_desc(idx);
@@ -770,11 +938,11 @@ impl UsbBusTrait for UsbBus {
             return Err(UsbError::WouldBlock);
         }
 
-        // SAFETY: EP_BUFS is a static buffer pool. The index is valid (bounded by
-        // NUM_ENDPOINTS * 4). OWN=0 was verified above, so USB hardware won't
-        // access this buffer until we set OWN=1 via bdt_write below.
+        // SAFETY: tx_buf is a 64-byte 'static packet buffer of this
+        // endpoint's IN direction, and len <= 64. OWN=0 was verified above,
+        // so the USB hardware does not touch it until bdt_write below sets OWN.
         unsafe {
-            EP_BUFS.bufs[idx][..len].copy_from_slice(&buf[..len]);
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), tx_buf, len);
         }
 
         // Build descriptor and hand to USB
@@ -786,9 +954,7 @@ impl UsbBusTrait for UsbBus {
             false,
         );
 
-        // SAFETY: idx is valid, EP_BUFS is static.
-        let buf_addr = unsafe { EP_BUFS.bufs[idx].as_ptr() as u32 };
-        bdt_write(idx, desc, buf_addr);
+        bdt_write(idx, desc, tx_buf as u32);
 
         // Toggle for next transfer
         state.tx_data_toggle = !state.tx_data_toggle;
@@ -816,19 +982,24 @@ impl UsbBusTrait for UsbBus {
 
         let odd = state.rx_complete_odd;
         let idx = bdt_index(ep, false, odd);
+        let Some(rx_buf) = self.ep_buf(ep, false, odd) else {
+            return Err(UsbError::InvalidEndpoint);
+        };
+        let state = &mut self.inner_mut().endpoints[ep];
 
-        // Read byte count from completed BD
+        // Read byte count from completed BD. The controller writes at most
+        // the armed size (max_packet_size <= 64) into the buffer.
         let bd_desc = bdt_read_desc(idx);
-        let count = bd_byte_count(bd_desc) as usize;
+        let count = (bd_byte_count(bd_desc) as usize).min(EP_BUF_SIZE);
 
         if count > buf.len() {
             return Err(UsbError::BufferOverflow);
         }
 
         // SAFETY: OWN=0 (rx_ready was set by poll()), so USB hardware won't
-        // modify this buffer. The count is validated against buf.len() above.
+        // modify this 64-byte 'static buffer. count <= 64 and <= buf.len().
         unsafe {
-            buf[..count].copy_from_slice(&EP_BUFS.bufs[idx][..count]);
+            core::ptr::copy_nonoverlapping(rx_buf, buf.as_mut_ptr(), count);
         }
 
         state.rx_ready = false;
@@ -857,6 +1028,13 @@ impl UsbBusTrait for UsbBus {
         // just handed us (`rx_complete_odd`) — never a separately tracked
         // counter, which desynchronises after the first packet.
         self.arm_rx(ep, odd, self.rx_bank_data1(ep, odd));
+
+        // The other bank completed too while this one waited: it is next.
+        let state = &mut self.inner_mut().endpoints[ep];
+        if let Some(next) = state.rx_queued.take() {
+            state.rx_complete_odd = next;
+            state.rx_ready = true;
+        }
 
         Ok(count)
     }
@@ -1026,6 +1204,7 @@ impl UsbBusTrait for UsbBus {
                     state.rx_setup = true;
                     state.rx_ready = true;
                     state.rx_complete_odd = is_odd;
+                    state.rx_queued = None;
                     // After SETUP, unfreeze (clear TXSUSPENDTOKENBUSY).
                     // Whole-register write — see reset(). This both clears
                     // the freeze and leaves USBENSOFEN set.
@@ -1042,8 +1221,18 @@ impl UsbBusTrait for UsbBus {
                 }
 
                 ep_out |= 1 << ep;
-                state.rx_ready = true;
-                state.rx_complete_odd = is_odd;
+                // Both banks can complete before the class reads one (a
+                // class that holds off its reads for flow control). Keep
+                // the second in order behind the first: overwriting
+                // `rx_complete_odd` would leave the first bank owned by the
+                // CPU and never re-armed, and the controller would NAK
+                // every later OUT packet on this endpoint.
+                if state.rx_ready && !state.rx_setup {
+                    state.rx_queued = Some(is_odd);
+                } else {
+                    state.rx_ready = true;
+                    state.rx_complete_odd = is_odd;
+                }
             }
         }
 
@@ -1134,38 +1323,45 @@ pub trait UsbBusExt: Sized {
 
 impl UsbBusExt for pac::Usb0 {
     fn usb_bus(self, sim: &pac::Sim, clocks: &Clocks) -> UsbBus {
-        // Select PLL as source for USB clock
-        sim.sopt2().modify(|_, w| {
-            w.pllfllsel().pll()
-             .usbsrc()._1()
-        });
-
-        // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
-        #[cfg(feature = "mk20d7")]
-        {
-            let (frac, div) = match usb_clk_divider(clocks.core_clk().to_raw()) {
-                Some(v) => v,
-                None => panic!("USB needs a 72, 96 or 120 MHz PLL to reach 48 MHz"),
-            };
-            // SAFETY: USBDIV is a 3-bit field; usb_clk_divider only yields 1, 2 or 4.
-            sim.clkdiv2().write(|w| unsafe {
-                w.usbfrac().bit(frac)
-                 .usbdiv().bits(div)
-            });
-        }
-        #[cfg(feature = "mk20d5")]
-        {
-            let _ = clocks;
-            // SAFETY: USBDIV is a 3-bit field; value 0 fits.
-            // 48 MHz PLL: 48 x 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
-            sim.clkdiv2().write(|w| unsafe {
-                w.usbdiv().bits(0)
-            });
-        }
-
-        // Enable USB clock gate
-        sim.scgc4().modify(|_, w| w.usbotg().enabled());
-
-        UsbBus::new()
+        setup_usb_clock(sim, clocks);
+        // `self` (USB0) is consumed, so this runs once and the bus is the only
+        // user of EP_BUFS. A raw pointer, no reference to the static.
+        let bufs = (&raw mut EP_BUFS).cast::<UsbBuffer>();
+        UsbBus::new(bufs, MAX_BUFS - TAIL_BUFS)
     }
+}
+
+/// The USB 48 MHz clock (SIM SOPT2, CLKDIV2) and the clock gate (SCGC4).
+fn setup_usb_clock(sim: &pac::Sim, clocks: &Clocks) {
+    // Select PLL as source for USB clock
+    sim.sopt2().modify(|_, w| {
+        w.pllfllsel().pll()
+         .usbsrc()._1()
+    });
+
+    // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
+    #[cfg(feature = "mk20d7")]
+    {
+        let (frac, div) = match usb_clk_divider(clocks.core_clk().to_raw()) {
+            Some(v) => v,
+            None => panic!("USB needs a 72, 96 or 120 MHz PLL to reach 48 MHz"),
+        };
+        // SAFETY: USBDIV is a 3-bit field; usb_clk_divider only yields 1, 2 or 4.
+        sim.clkdiv2().write(|w| unsafe {
+            w.usbfrac().bit(frac)
+             .usbdiv().bits(div)
+        });
+    }
+    #[cfg(feature = "mk20d5")]
+    {
+        let _ = clocks;
+        // SAFETY: USBDIV is a 3-bit field; value 0 fits.
+        // 48 MHz PLL: 48 x 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
+        sim.clkdiv2().write(|w| unsafe {
+            w.usbdiv().bits(0)
+        });
+    }
+
+    // Enable USB clock gate
+    sim.scgc4().modify(|_, w| w.usbotg().enabled());
 }

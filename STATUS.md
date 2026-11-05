@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-10-15 (0.2.2: ADC multi-channel scan fixes). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
+**Last updated:** 2026-11-05 (0.3.2: `start_continuous_scan` reads RA then RB and keeps running. 0.3.1: no 64-bit divide; USB packet buffers per allocated direction, 6 in the BDT tail, `UsbBus::with_buffers`. 0.3.0: SPI TCF wait and per-transaction baud, DMA wait timeout and DMAMUX source clear, USB second RX bank, `usb-endpoints-4`). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## PAC Dependency Status
 
-The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in progress). See `../mk20dx-pac/docs/STATUS.md` for details.
+The `mk20dx-pac` crates are mature and published on crates.io as `mk20d5-pac` and `mk20d7-pac` (0.1.x); the HAL takes them from crates.io. See `../mk20dx-pac/docs/STATUS.md` for details.
 
 | PAC Crate | Compiles | Correctness Patches | Ergonomics Patches | Validation |
 |-----------|----------|--------------------|--------------------|------------|
@@ -35,7 +35,7 @@ The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in prog
 
 Semantic enum patches now provide named enums across PORT (MUX + bitfields), FTM, ADC, MCG, SIM SOPT2, SIM SCGC, DMA ATTR, SPI, and UART fields — the HAL uses these directly instead of raw bit patterns.
 
-PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is ready for publishing.
+PAC is dual-licensed MIT/Apache-2.0 and has a README.md per crate.
 
 ---
 
@@ -150,12 +150,16 @@ Reference: K20 ref manual chapter 35 (UART)
 - [x] `pack_pushr()` const fn — build 32-bit PUSHR command words (data + PCS + CONT + EOQ)
 - [x] MCR control: `flush_fifos()`, `set_rx_fifo()`, `set_rooe()`
 - [x] Status/request control: `clear_status()`, `disable_dma_requests()`, `wait_tx_complete()`
+  (0.3.0: clears TCF once the TX FIFO is empty and waits for the last frame's TCF, bounded by two frames at CTAR0's timing)
+- [x] Per-transaction SCK rate (0.3.0): `spi::Baud`, `Spi::baud()`, `Spi::set_baud()`, `spi::frame_bus_cycles()`
+- [x] Byte transfers drop a stale RX FIFO byte before the push (0.3.0, MCR `CLR_RXF`)
 - [x] `write_dma_pushr()` — 32-bit DMA writes to PUSHR with full command field control
 - [x] `read_dma()` — dual-channel DMA reads (TX sends dummy PUSHR words via SOFF=0, RX captures POPR bytes into buffer)
 - [x] `DmaReadTransfer<TX_CH, RX_CH>` — lifetime-safe dual-channel handle with abort-on-drop (cleans up both TX and RX channels)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (11 tests, requires PTC6→PTC7 wire)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi.rs` (5 tests, baud + pack_pushr properties)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_async_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_baud.rs` (5 tests, `set_baud` CTAR0 fields and `frame_bus_cycles` at the FLXS1 rates)
 
 Reference: K20 ref manual chapter 37 (DSPI)
 
@@ -238,11 +242,11 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
 - [x] Macro-generated implementation for each ADC instance
 - [x] ADC1 feature-gated behind `mk20d7`
 - [x] SC3 w1c hazard avoided (write() instead of modify())
-- [ ] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — **broken, see 2026-10-15**
+- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — broken up to 0.3.1, fixed in 0.3.2 (see 2026-11-02)
   - [x] `ScanConfig` struct (channels, modulus, prescaler, multiplier)
   - [x] `ContinuousScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] PDB pre-trigger 0 + back-to-back pre-trigger 1 for 2-channel mode
-  - [x] DMA reads ADC RA into results buffer, auto-wraps via `dest_last_adjust`
+  - [x] DMA reads RA, then RB, into the results buffer and keeps its request on; `source_last_adjust` and `dest_last_adjust` wrap it (0.3.2)
 - [x] Multi-channel scanning (3+ channels via `start_multi_channel_scan()`)
   - [x] `MultiChannelScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] DMA channel linking: DMA-A reads results, links to DMA-B on the minor and the major loop (0.2.2)
@@ -250,8 +254,9 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
   - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
   - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
-  and `tests/adc_scan.rs` (7 tests: multi-channel slot map for 3/4/5 channels, PDB rate,
-  averaging kept, restart after a sequence error)
+  and `tests/adc_scan.rs` (11 tests: multi-channel slot map for 3/4/5 channels, PDB rate,
+  averaging kept, restart after a sequence error; continuous scan with 1 and 2 channels,
+  and a multi-channel scan after a continuous one)
 
 Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
@@ -265,8 +270,10 @@ Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 - [x] `TransferSize` enum (Bits8/Bits16/Bits32/Burst16) mapped to TCD ATTR SSIZE/DSIZE
 - [x] `TransferConfig` struct for full TCD configuration
 - [x] `DmaSource` newtype with 40+ named constants for DMAMUX routing
-- [x] `DmaError` enum (9 error variants parsed from ES register)
+- [x] `DmaError` enum (8 error variants parsed from ES register, plus `Cancelled` and `Timeout`)
 - [x] DMAMUX source routing: `set_source()`, `disable_source()`
+  (0.3.0: `set_source()` first clears the same source from every other channel; RM: two CHCFG with one SOURCE is unpredictable)
+- [x] Bounded waits (0.3.0): `DmaTransfer::wait_timeout()`, `DmaReadTransfer::wait_timeout()` (DWT cycles, `DmaError::Timeout`)
 - [x] TCD configuration: `unsafe configure()` writes all TCD registers
 - [x] Transfer control: `enable_request()`, `disable_request()`, `start()`
 - [x] Status: `is_complete()`, `has_error()`, `is_active()`, `error_status()`
@@ -291,12 +298,13 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
 - [x] `UsbBus` struct implementing `usb_device::bus::UsbBus` trait (v0.3)
 - [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(&sim, &clocks)` → `UsbBus`
-- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong
-- [x] Static endpoint buffer pool — 64 × 64-byte buffers, 4-byte aligned
+- [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong; with 4 endpoints the 384 B after the table hold 6 packet buffers (0.3.1)
+- [x] Packet buffers — two per allocated endpoint direction (EP0 four), from the BDT tail, then the HAL pool (`usb_bus()`) or the application's (`UsbBus::with_buffers`, 0.3.1)
 - [x] USB 48 MHz clock configuration (SIM SOPT2/CLKDIV2/SCGC4)
   - USBFRAC/USBDIV derived from `Clocks`: 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - [x] Endpoint allocation with type/direction tracking
-- [x] Ping-pong buffer management (EVEN/ODD banks)
+- [x] Ping-pong buffer management (EVEN/ODD banks); 0.3.0 keeps a second completed RX bank, so an OUT endpoint does not stall when the class holds off its reads
+- [x] Feature `usb-endpoints-4` (0.3.0): endpoints 0-3 only. USB RAM since 0.3.1: 1,152 B in place of 4,608 B with `usb_bus()`, 512 B + 64 B per buffer past the 6 in the BDT tail with `UsbBus::with_buffers`
 - [x] DATA0/DATA1: RX EVEN=DATA0, ODD=DATA1 (bulk/interrupt); EP0 re-arms DATA1. TX toggle per endpoint
 - [x] TOKDNE FIFO processing (read STAT before clearing ISTAT)
 - [x] SETUP token detection and data toggle reset
@@ -306,9 +314,54 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] ISTAT/ERRSTAT w1c correct handling (write() not modify())
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
 - [x] `poll()` from the USB0 interrupt; SOF opt-in (`enable_sof_interrupt`, `take_sof`, `frame_number`)
-- [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only) and
+- [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only),
+  `tests/usb_bufs.rs` (5 tests, packet buffers and ENDPTn per direction; run with and without the
+  testsuite feature `usb-endpoints-4`) and
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
+
+### 2026-11-05 — 0.3.2 released (ADC continuous scan)
+
+One fix: `start_continuous_scan` (1-2 channels) reads RA, then RB, and keeps
+running. No API change. Proof: `mk20dx-testsuite/tests/adc_scan.rs` 11/11 on
+the FLXS1 board; the old code failed the new tests. See 2026-10-15 ("Fixed
+2026-11-02") for the details. flxs1 does not use this function (it scans 4
+channels with `start_multi_channel_scan`), so 0.3.2 changes nothing there.
+
+### 2026-11-02 — RAM and flash: no 64-bit divide, USB buffers per direction (0.3.1)
+
+Run on the FLXS1 board (MK20DX256, J-Link), all
+passed: `delay` 6/6 (zero delay 35 ticks, budget 100), `timer` 10/10,
+`lptmr` 8/8, `uart` 4/4, `spi_baud` 5/5, `usb` 6/6, `usb_bufs` 5/5 with 16
+endpoints and 5/5 with `usb-endpoints-4`, `usb_irq` 4/4 with the host in
+both layouts (4 Note On received; ENDPT1 = 0x19 OUT only, ENDPT2 = 0x15 IN
+only, the usb_dev.c values). With `usb-endpoints-4`, EP0 and EP1 OUT receive
+into the BDT-tail buffers. Sizes: see CHANGELOG (0.3.1).
+
+flxs1 (`usb-endpoints-4`, EP0 + EP1 OUT/IN, `usb_bus()`) on the same source
+(`6208ee1`): `cargo bench-hw` 49/49 on the FLXS1 board, and the ignored
+`midi_clock_out_usb` passed (USB MIDI from the device to the host: FA/F8/FC/FB
+in order, FA to the first F8 2.6-2.75 ms). With `usb_irq` (host to device)
+this covers both directions on the new buffers. flxs1 sizes: static RAM
+49,052 -> 48,688 B, flash +108 B. One first attach after the testsuite image
+failed ("Failed to write register DRW", a known first-attach problem after a
+foreign image); the rerun passed.
+
+### 2026-11-02 — 0.3.0 released (SPI, DMA, USB fixes found on flxs1)
+
+One release for the 0.3.0 changelog section (dated 2026-10-18, never
+published) and the later Unreleased changes. See CHANGELOG.md for each item.
+Proof on hardware:
+
+- `set_baud` / `frame_bus_cycles`: `mk20dx-testsuite/tests/spi_baud.rs`, 5/5.
+- `wait_tx_complete` bound: flxs1 timings with the new bound: flash chunk
+  read 520 -> 70 us of work, display line 530-576 -> 310-334 us, button bus
+  wait 250-281 -> 31 us.
+- USB second RX bank: before the fix, the flxs1 sysex import stopped after
+  112 packets. With `b428a85`, flxs1 `tools/flxs1-bench/tests/sysex_import.rs`
+  (`a_c_dump_imports_and_loads`: 4 SysEx messages, about 11 KB) passed 4 of
+  4 runs, 2026-10-27 to 2026-11-02. The test checks that the import gets to
+  COMPLETE; it does not count USB packets.
 
 ### 2026-10-15 — ADC multi-channel scan: slot map, rate, averaging (0.2.2)
 
@@ -344,6 +397,17 @@ RB = 1: the DMA reads RA for both slots. `auto_disable: true` also clears
 ERQ after the first scan, so the results never update. A multi-channel scan
 started after it on the same ADC did not run (cause not proved; the unread
 RB is the probable one). Nothing in flxs1 uses it.
+
+Fixed 2026-11-02, released in 0.3.2 (2026-11-05): the DMA reads RA, then RB (`source_offset`
+4, `source_last_adjust` -4 x channels) and keeps its request on
+(`auto_disable: false`). A 1-channel scan also turns PDB pre-trigger 1 off,
+which a 2-channel scan before it left on (the multi-channel scan already
+did). On the FLXS1 board, `tests/adc_scan.rs` 11/11: [VREFSH, VREFSL] gives
+[1023, 1], [VREFSL, VREFSH] gives [1, 1023], every slot rewritten in each of
+500 checks over 100 ms, 1 channel after 2, and a 4-channel multi scan after
+a continuous scan. The same tests on the old code failed at once: "scan
+stopped: not rewritten [500, 500]". The multi-channel stall was not seen
+again; RB is now read each scan.
 
 ### 2026-10-14 — interrupt-driven poll, SOF tick, RX toggle fix
 
@@ -423,6 +487,10 @@ endpoints whatever the class uses. On the FLXS1 that cut the application's
 stack from about 13.5 KB to 6 KB. Sizing the pool by the endpoints actually
 allocated is wanted; a MIDI device needs 3.
 
+Closed in 0.3.1: `usb-endpoints-4` (0.3.0) cut it to 1,536 B, and 0.3.1 gives
+buffers per allocated direction, keeps 6 in the BDT tail and adds
+`UsbBus::with_buffers` (640 B for EP0 + EP1 OUT/IN).
+
 ---
 
 ### 2026-09-11 — first real hardware bring-up attempt (superseded by the entry above)
@@ -470,7 +538,7 @@ Proof the same board and cable enumerate: the vendor C firmware
 A second, independent limitation: `EP_BUFS` plus the BDT is a fixed 4.6 KB
 of statics for 16 endpoints whatever the class uses. On the FLXS1 that cut
 the application's stack from about 13.5 KB to 6 KB. Sizing the pool by the
-endpoints actually allocated is wanted; a MIDI device needs 3.
+endpoints actually allocated is wanted; a MIDI device needs 3. (Closed in 0.3.1, see above.)
 
 Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 
@@ -773,3 +841,6 @@ Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
 | 2026-02-22 | HAL exports `on_*_interrupt()` functions (not `#[interrupt]` handlers) | Avoids linker conflicts — user wires ISR to HAL handler. Standard pattern in embassy-stm32, embassy-nrf. |
 | 2026-02-22 | `embassy-sync` AtomicWaker for async (not custom waker) | Battle-tested, executor-agnostic, minimal footprint. Works with Embassy, RTIC, or bare executors. |
 | 2026-02-22 | Optional `async` feature flag (not always-on) | Keeps blocking-only builds dependency-free. Users opt in to embassy-sync + embedded-hal-async. |
+| 2026-11-02 | USB packet buffers in the 384 B after a 4-endpoint BDT (0.3.1) | The 512-byte alignment makes the BDT type 512 B; with 4 endpoints only 128 B are the table. The RM does not say the controller leaves the entries of disabled endpoints alone; Teensyduino depends on it (its table is `(NUM_ENDPOINTS+1)*4` entries with `.dmabuffers`, `.usbbuffers` and `.data` after it). Passed `usb_bufs` and `usb_irq` with a host in that layout. |
+| 2026-11-02 | `UsbBus::with_buffers` as an inherent constructor, not a new `UsbBusExt` method | A new required method on the public, unsealed `UsbBusExt` would break an outside implementor; the constructor only adds API, so 0.3.1. |
+| 2026-11-02 | One 0.3.0 release for the unpublished 0.3.0 section and the Unreleased changes (not 0.3.0 then 0.3.1) | 0.3.0 was never published. The Unreleased changes only add API and fix 0.3.0 code, and a separate 0.3.0 would ship the 440 us `wait_tx_complete` bound and the USB RX stall. |

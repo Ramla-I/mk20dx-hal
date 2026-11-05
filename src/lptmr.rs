@@ -139,8 +139,13 @@ impl Lptmr {
         let compare = match clock {
             LptmrClock::Lpo1kHz => period_ms.min(65535) as u16,
             LptmrClock::ErClk32k => {
-                let ticks = (period_ms as u64 * 32768 / 1000).min(65535);
-                ticks as u16
+                // 2000 ms is 65536 ticks, past the 16-bit compare: clamp
+                // first, so period_ms * 32768 fits a u32 (no 64-bit divide).
+                if period_ms >= 2000 {
+                    65535
+                } else {
+                    (period_ms * 32768 / 1000) as u16
+                }
             }
             _ => period_ms.min(65535) as u16,
         };

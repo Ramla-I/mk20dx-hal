@@ -29,7 +29,7 @@ Both are ARM Cortex-M4 (no FPU), target `thumbv7em-none-eabi`.
 
 ## Sibling Project: mk20dx-pac
 
-The PAC lives at `../mk20dx-pac/`. It is mature (Phase 5 complete, Phase 6 publishing in progress), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT, FTM, ADC, MCG, SIM, DMA ATTR, SPI, UART, and SIM SCGC fields — the HAL uses these directly instead of raw bit patterns.
+The PAC lives at `../mk20dx-pac/`. It is mature (published on crates.io as `mk20d5-pac` / `mk20d7-pac` 0.1.x; the HAL depends on those versions, not on the path), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT, FTM, ADC, MCG, SIM, DMA ATTR, SPI, UART, and SIM SCGC fields — the HAL uses these directly instead of raw bit patterns.
 
 Key PAC documentation:
 - `../mk20dx-pac/CLAUDE.md` — PAC project guide, build commands, SVD patching conventions
@@ -128,6 +128,7 @@ Following the dominant embedded Rust ecosystem pattern (stm32f4xx-hal, nrf-hal, 
 | `AdcExt` | `pac::Adc0`, etc. | `adc(clocks, sim)` | `Adc<Instance>` |
 | `DmaExt` | `pac::Dma` | `split(dmamux, sim)` | `DmaChannels` |
 | `UsbBusExt` | `pac::Usb0` | `usb_bus(&sim, &clocks)` | `UsbBus` |
+| (constructor) | `pac::Usb0` | `UsbBus::with_buffers(usb0, &sim, &clocks, bufs)`: packet buffers from the application | `UsbBus` |
 
 ```rust
 use mk20dx_hal::prelude::*;

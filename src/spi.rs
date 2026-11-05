@@ -97,8 +97,10 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     for (pbr_idx, &pbr) in PBR_PRESCALERS.iter().enumerate() {
         for (br_idx, &br) in BR_SCALERS.iter().enumerate() {
             for dbr in [false, true] {
-                let mult: u64 = if dbr { 2 } else { 1 };
-                let baud = (bus_clk as u64 * mult / (pbr as u64 * br as u64)) as u32;
+                // bus_clk * 2 / (PBR * BR) == bus_clk / (PBR * BR / 2): every
+                // BR scaler is even. 32-bit math, no 64-bit divide, no overflow.
+                let div = pbr as u32 * br as u32 / if dbr { 2 } else { 1 };
+                let baud = bus_clk / div;
                 if baud <= target && baud > best_baud {
                     best_baud = baud;
                     best_br = br_idx as u8;
@@ -112,7 +114,52 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     (best_br, best_pbr, best_dbr)
 }
 
+/// The CTAR0 baud fields (BR, PBR, DBR) for one SCK rate, from [`calc_baud`]:
+/// the fastest rate not above the target. For [`Spi::set_baud`], when the
+/// devices on one bus need different rates. With DBR set and PBR not /2 the
+/// SCK duty cycle is not 50/50 (K20 RM Table 45-38): check the device's
+/// clock high and low times for such a rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Baud {
+    br: u8,
+    pbr: u8,
+    dbr: bool,
+}
+
+impl Baud {
+    /// The fields for `target` at the bus clock of `clocks`.
+    pub fn new(clocks: &Clocks, target: Hertz) -> Self {
+        Self::from_bus_clk(clocks.bus_clk().to_Hz(), target.to_raw())
+    }
+
+    /// The fields for `target` Hz at a bus clock of `bus_clk` Hz.
+    pub fn from_bus_clk(bus_clk: u32, target: u32) -> Self {
+        let (br, pbr, dbr) = calc_baud(bus_clk, target);
+        Baud { br, pbr, dbr }
+    }
+
+    /// The SCK rate in Hz these fields give at a bus clock of `bus_clk` Hz.
+    pub fn rate(&self, bus_clk: u32) -> u32 {
+        // As in calc_baud: BR is even, so halving the divisor is exact. The
+        // masks keep the fields in range (they always are) without a bounds check.
+        let div = PBR_PRESCALERS[self.pbr as usize & 3] as u32 * BR_SCALERS[self.br as usize & 15] as u32
+            / if self.dbr { 2 } else { 1 };
+        bus_clk / div
+    }
+}
+
 // ----- PUSHR Packing -----
+
+/// The bus cycles of one frame with the CTAR fields given: the frame's bits
+/// at the SCK period, plus the PCS-to-SCK, after-SCK and after-transfer
+/// delays (K20 RM 45.4.2: each is PRESCALER x 2^(SCALER + 1) bus cycles).
+pub fn frame_bus_cycles(bits: u32, br: u8, pbr: u8, dbr: bool, delays: [(u8, u8); 3]) -> u32 {
+    const PRE: [u32; 4] = [1, 3, 5, 7];
+    let period = PBR_PRESCALERS[pbr as usize] as u32 * BR_SCALERS[br as usize] as u32 / if dbr { 2 } else { 1 };
+    let delay: u32 = delays.iter().map(|&(pre, scale)| PRE[pre as usize] << (scale as u32 + 1)).sum();
+    bits * period + delay
+}
 
 /// Build a PUSHR command word from TX data and control fields.
 ///
@@ -236,6 +283,10 @@ macro_rules! spi_impl {
             fn transfer_byte(byte: u8) -> Result<u8, Error> {
                 let spi = Self::regs();
 
+                // A byte left in the RX FIFO (a frame that ended after the
+                // last flush) would be read as this transfer's byte.
+                Self::drop_stale_rx();
+
                 // Wait for TX FIFO space (no timeout — assumes responsive hardware)
                 while spi.sr().read().tfff().is_full() {}
                 // Clear TFFF (w1c)
@@ -266,6 +317,15 @@ macro_rules! spi_impl {
                 let data = spi.popr().read().rxdata().bits() as u8;
                 spi.sr().write(|w| w.rfdf().not_empty());
                 Ok(data)
+            }
+
+            /// Empty the RX FIFO and clear RFDF and RFOF when it holds a byte.
+            fn drop_stale_rx() {
+                let spi = Self::regs();
+                if spi.sr().read().rxctr().bits() != 0 {
+                    spi.mcr().modify(|_, w| w.clr_rxf().clear());
+                    spi.sr().write(|w| w.rfdf().not_empty().rfof().overflow());
+                }
             }
 
             /// Return the TX (PUSHR) register address for DMA configuration.
@@ -301,6 +361,40 @@ macro_rules! spi_impl {
                 Self::regs().mcr().modify(|_, w| if enabled { w.rooe().shift_in() } else { w.rooe().ignore() });
             }
 
+            /// The CTAR0 baud fields now in use.
+            pub fn baud(&self) -> Baud {
+                let r = Self::regs().$ctar_fn(0).read();
+                Baud { br: r.br().bits(), pbr: r.pbr().bits(), dbr: r.dbr().bit_is_set() }
+            }
+
+            /// Change the SCK rate of CTAR0 to `baud`, for the next frame on.
+            /// The caller holds the bus with no frame queued (as after a
+            /// `flush`). The module goes to the Stopped state for the write
+            /// (K20 RM 45.4.1: the safe state for configuration writes; it
+            /// stops at the next frame boundary) and runs again after it.
+            /// The same fields again cost one register read.
+            pub fn set_baud(&mut self, baud: Baud) {
+                if self.baud() == baud {
+                    return;
+                }
+                let spi = Self::regs();
+                spi.mcr().modify(|_, w| w.halt().halted());
+                while spi.sr().read().txrxs().bit_is_set() {}
+                spi.$ctar_fn(0).modify(|_, w| {
+                    let w = match baud.pbr {
+                        0 => w.pbr().div2(),
+                        1 => w.pbr().div3(),
+                        2 => w.pbr().div5(),
+                        _ => w.pbr().div7(),
+                    };
+                    let w = if baud.dbr { w.dbr().double() } else { w.dbr().normal() };
+                    // SAFETY: br is a 4-bit field and calc_baud returns an
+                    // index below 16.
+                    unsafe { w.br().bits(baud.br) }
+                });
+                spi.mcr().modify(|_, w| w.halt().running());
+            }
+
             /// Clear all W1C status flags (TCF, EOQF, TFUF, RFOF, TFFF, RFDF).
             pub fn clear_status(&mut self) {
                 Self::regs().sr().write(|w| {
@@ -317,11 +411,47 @@ macro_rules! spi_impl {
 
             /// Wait for TX FIFO to drain and last frame to shift out.
             /// Call after DMA to ensure data is on the wire before deasserting CS.
+            ///
+            /// TCF is set by every frame, so the one an earlier frame left
+            /// set is cleared once the FIFO is empty (the last frame is then
+            /// in the shifter), and the wait is for the TCF of that last
+            /// frame. Without the clear the wait ended while the last frame
+            /// still shifted: its RX byte then landed in the RX FIFO after
+            /// the caller's flush, and the next byte transfer read it.
+            /// The wait is bounded for the case where the last frame ended
+            /// before the clear: at a fast SCK the frame is often over by
+            /// then, and no TCF follows. The bound is two frames at CTAR0's
+            /// timing, counted in SR reads, each of which takes at least one
+            /// bus cycle; a fixed bound sized for 1 MHz cost about 440 us of
+            /// every such wait at 15-30 MHz.
             pub fn wait_tx_complete(&self) {
                 let spi = Self::regs();
                 while spi.sr().read().txctr().bits() != 0 {}
-                while !spi.sr().read().tcf().is_complete() {}
                 spi.sr().write(|w| w.tcf().complete());
+                let bound = Self::last_frame_spins();
+                let mut spins = 0u32;
+                while !spi.sr().read().tcf().is_complete() && spins < bound {
+                    spins += 1;
+                }
+                spi.sr().write(|w| w.tcf().complete());
+            }
+
+            /// Two frames at CTAR0's timing, in bus cycles: the bound of
+            /// `wait_tx_complete`'s TCF wait in SR reads.
+            fn last_frame_spins() -> u32 {
+                let r = Self::regs().$ctar_fn(0).read();
+                let frame = frame_bus_cycles(
+                    r.fmsz().bits() as u32 + 1,
+                    r.br().bits(),
+                    r.pbr().bits(),
+                    r.dbr().bit_is_set(),
+                    [
+                        (r.pcssck().bits(), r.cssck().bits()),
+                        (r.pasc().bits(), r.asc().bits()),
+                        (r.pdt().bits(), r.dt().bits()),
+                    ],
+                );
+                2 * frame
             }
 
             /// Start a DMA-backed write transfer.
@@ -621,6 +751,9 @@ mod async_impl {
                 async fn transfer_byte_async(byte: u8) -> Result<u8, Error> {
                     let spi = Self::regs();
 
+                    // As in `transfer_byte`: no stale RX byte before the push.
+                    Self::drop_stale_rx();
+
                     // Wait for TX FIFO space
                     while spi.sr().read().tfff().is_full() {}
                     spi.sr().write(|w| w.tfff().not_full());
@@ -672,6 +805,10 @@ mod async_impl {
                         spi.sr().write(|w| w.rfdf().not_empty());
                         return Err(Error::Overrun);
                     }
+
+                    // TCF can be seen before the received byte is in the RX
+                    // FIFO; wait for it.
+                    while spi.sr().read().rfdf().is_empty() {}
 
                     // Read POPR BEFORE clearing RFDF — order matters.
                     // Clearing RFDF first causes re-assertion (FIFO non-empty),
